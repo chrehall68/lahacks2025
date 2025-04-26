@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import * as vscode from "vscode";
 import {
   CancellationToken,
@@ -36,6 +36,7 @@ let ai: GoogleGenAI;
 let lastFixContext: string;
 let fixes: CodeAction[];
 let quickfixProvider: DiagnosticAggregatorViewProvider;
+let AIPoweredDiagnostics: vscode.DiagnosticCollection;
 
 export function activate(context: ExtensionContext) {
   // // The server is implemented in node
@@ -155,6 +156,14 @@ export function activate(context: ExtensionContext) {
   languages.onDidChangeDiagnostics((e) => {
     explainDiag(languages.getDiagnostics());
   });
+
+  // also listen for saved files and then come up with
+  // ai-powered diagnostics for them
+  AIPoweredDiagnostics = languages.createDiagnosticCollection("ai-powered");
+  context.subscriptions.push(AIPoweredDiagnostics);
+  context.subscriptions.push(
+    workspace.onDidSaveTextDocument(makeAIPoweredDiagnostics)
+  );
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
@@ -223,6 +232,97 @@ async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
       fixes.push(fix);
     }
   }
+}
+
+async function makeAIPoweredDiagnostics(doc: TextDocument): Promise<void> {
+  console.log("makeAIPoweredDiagnostics called");
+  AIPoweredDiagnostics.delete(doc.uri);
+  // need to get a list of diagnostics
+  // from the given document
+  // try just asking?
+  const lines = doc.getText().split("\n");
+  const processedText = lines
+    .map((line, idx) => {
+      return `${idx}|${line}`;
+    })
+    .join("\n");
+
+  const prompt = `You are acting as a senior developer giving diagnostics. Your role is to output diagnostics based on the following code. The diagnostics should take into account things that a normal language server can't take into account (IE doing \`in\` on a python list is much slower than doing it on a set, suggesting that two nested for loops might be able to be optimized into one loop if some trick is used, suggesting that Python classes shouldn't use getters and setters, or any other thing that a senior developer would know about and a normal language server wouldn't). The diagnostics should be of the format:
+type Position {
+  line: number,
+  character: number
+}
+type Range {
+  start: Position,
+  end: Position,
+}
+type Diagnostic {
+  range: Range,
+  message: string,
+}
+
+Please note that the line numbers and column numbers are zero indexed, and that the code has been formatted to make it easy to read. Each line is in the format {line}|{lineText}
+
+Code:
+\`\`\`
+${processedText}
+\`\`\`
+`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            range: {
+              type: Type.OBJECT,
+              properties: {
+                start: {
+                  type: Type.OBJECT,
+                  properties: {
+                    line: { type: Type.NUMBER },
+                    character: { type: Type.NUMBER },
+                  },
+                  required: ["line", "character"],
+                },
+                end: {
+                  type: Type.OBJECT,
+                  properties: {
+                    line: { type: Type.NUMBER },
+                    character: { type: Type.NUMBER },
+                  },
+                  required: ["line", "character"],
+                },
+              },
+              required: ["start", "end"],
+            },
+            message: { type: Type.STRING },
+          },
+          required: ["range", "message"],
+        },
+      },
+    },
+  });
+  const diagnosticsText = response.text;
+  console.log("diagnosticsText", diagnosticsText);
+  const preDiagnostics: { range: Range; message: string }[] =
+    JSON.parse(diagnosticsText);
+
+  const diagnostics: Diagnostic[] = preDiagnostics.map((d) => {
+    return {
+      range: d.range,
+      message: d.message,
+      severity: vscode.DiagnosticSeverity.Warning,
+    };
+  });
+  console.log("diagnostics", diagnostics);
+
+  AIPoweredDiagnostics.set(doc.uri, diagnostics);
 }
 
 export async function deactivate(): Promise<void> {
