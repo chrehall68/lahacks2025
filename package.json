@@ -54,7 +54,52 @@
           "contextualTitle": "Quickfix Sidebar 2"
         }
       ]
-    }
+    },
+    "grammars": [
+      {
+        "injectTo": [
+          "source.js",
+          "source.js.jsx",
+          "source.jsx",
+          "source.ts",
+          "source.tsx"
+        ],
+        "scopeName": "inline.js.sql",
+        "path": "./syntaxes/js-sql.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.sql": "sql"
+        }
+      },
+      {
+        "injectTo": [
+          "source.js",
+          "source.js.jsx",
+          "source.jsx",
+          "source.ts",
+          "source.tsx"
+        ],
+        "scopeName": "inline.js.glsl",
+        "path": "./syntaxes/js-glsl.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.glsl": "glsl"
+        }
+      },
+      {
+        "injectTo": [
+          "source.c",
+          "source.h",
+          "source.cc",
+          "source.hh",
+          "source.cpp",
+          "source.hpp"
+        ],
+        "scopeName": "inline.cpp.sql",
+        "path": "./syntaxes/cpp-sql.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.sql": "sql"
+        }
+      }
+    ]
   },
   "activationEvents": [
     "*"

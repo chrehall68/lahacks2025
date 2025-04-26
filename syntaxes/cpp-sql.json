@@ -1,0 +1,43 @@
+{
+	"fileTypes": [],
+	"injectionSelector": "L:source -comment -string",
+	"scopeName": "inline.cpp.sql",
+	"patterns": [
+		{
+			"name": "taggedTemplates",
+			"contentName": "meta.embedded.block.sql",
+			"begin": "(\\/\\*@LANGUAGE:sql@\\*\\/)\\s*(((R)\\\"\\\"\\\"\\())",
+			"beginCaptures": {
+				"1": {
+					"name": "comment.block.cpp"
+				},
+				"2": {
+					"name": "punctuation.definition.string.begin"
+				},
+				"3": {
+					"name": "string.quoted.double.raw"
+				},
+				"4": {
+					"name": "meta.encoding"
+				}
+			},
+			"end": "(\\\"\\\"\\\"\\))",
+			"endCaptures": {
+				"0": {
+					"name": "punctuation.definition.string.end"
+				},
+				"1": {
+					"name": "string.quoted.double.raw"
+				}
+			},
+			"patterns": [
+				{
+					"include": "source.cpp#template-substitution-element"
+				},
+				{
+					"include": "source.sql"
+				}
+			]
+		}
+	]
+}
