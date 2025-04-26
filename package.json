@@ -65,7 +65,7 @@
     "compile": "tsc -b",
     "watch": "tsc -b -w",
     "lint": "eslint",
-    "postinstall": "cd client && $npm_execpath install"
+    "postinstall": "cd client && $npm_execpath install && cd ../server && $npm_execpath install"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",
