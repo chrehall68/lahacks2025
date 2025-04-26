@@ -48,7 +48,6 @@ const lastDocumentLength = new Map<
 const documentAttachments = new Map<Uri, TextDocumentAttachments>();
 const virtualDocumentContents = new Map<string, string>();
 const documentToVirtual = new Map<string, string[]>();
-let theClient: LanguageClient;
 const converter = new showdown.Converter();
 let lastFixContext: string;
 let fixes: CodeAction[];
@@ -220,6 +219,138 @@ class InjectionCodeLensProvider implements CodeLensProvider {
   }
 }
 
+class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
+  async provideCompletionItems(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken,
+    context: vscode.CompletionContext,
+  ) {
+    const attachments = getAttachments(document.uri);
+    const injection = getInjectionAtPosition(
+      attachments.injections,
+      document.offsetAt(position)
+    );
+
+    // If not in an injection fragment, forward the request to primary LS directly
+    if (!injection) {
+      if (document.uri.scheme === "embedded-content") {
+        let endpoint: JSONRPCEndpoint;
+        let extension: string;
+        if (document.languageId === "python") {
+          endpoint = pyrightEndpoint;
+          extension = "py";
+        } else if (document.languageId === "cpp") {
+          endpoint = clangdEndpoint;
+          extension = "cpp";
+        } else {
+          return null;
+        }
+
+        // call language server
+        const doc = document.getText();
+        const muxResult = await mutex.runExclusive(async () => {
+          if (!documentInitialized.get(document.uri.toString())) {
+            console.log("Sending textDocument/didOpen");
+            documentInitialized.set(document.uri.toString(), true);
+            lastDocumentVersion.set(document.uri.toString(), 0);
+            endpoint.notify("textDocument/didOpen", {
+              textDocument: {
+                uri: canonUri(document.uri) + "." + extension,
+                languageId: document.languageId,
+                version: document.version,
+                text: doc,
+              },
+            });
+          } else {
+            console.log(
+              "Sending didChange with version",
+              lastDocumentVersion.get(document.uri.toString())
+            );
+            endpoint.notify("textDocument/didChange", {
+              textDocument: {
+                uri: canonUri(document.uri) + "." + extension,
+                version: lastDocumentVersion.get(document.uri.toString()),
+              },
+              contentChanges: [
+                {
+                  range: {
+                    start: { line: 0, character: 0 },
+                    end: {
+                      line:
+                        lastDocumentLength.get(document.uri.toString())
+                          .line - 1,
+                      character: lastDocumentLength.get(
+                        document.uri.toString()
+                      ).character,
+                    },
+                  },
+                  text: doc,
+                },
+              ],
+            });
+            lastDocumentVersion.set(
+              document.uri.toString(),
+              lastDocumentVersion.get(document.uri.toString()) + 1
+            );
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          const lines = doc.split("\n");
+          lastDocumentLength.set(document.uri.toString(), {
+            line: lines.length,
+            character: lines[lines.length - 1].length,
+          });
+          console.log("Sent textDocument/didOpen and didChange");
+          console.log("Trying to get language server response");
+          const completionResult: { items: vscode.CompletionItem[] } =
+            await endpoint.send("textDocument/completion", {
+              textDocument: {
+                uri: canonUri(document.uri) + "." + extension,
+              },
+              position: position,
+              context: context,
+            });
+          console.log(
+            "Language server completion result",
+            completionResult
+          );
+          return completionResult;
+        });
+
+        if (muxResult) {
+          const results: vscode.CompletionItem[] = [];
+          for (const item of muxResult.items) {
+            const it = new vscode.CompletionItem(item.label);
+            it.kind = item.kind;
+            it.sortText = item.sortText;
+            results.push(it);
+          }
+          return results;
+        }
+      }
+
+      return null;
+    }
+
+    // const d = await workspace.openTextDocument(
+    //   attachments.lang2v c[injection.language]
+    // );
+    // await window.showTextDocument(d, { preview: false });
+
+    // Otherwise, forward to minion LS
+    const otherDoc = await workspace.openTextDocument(
+      attachments.lang2vdoc[injection.language]
+    );
+    const res = await commands.executeCommand<vscode.CompletionList>(
+      "vscode.executeCompletionItemProvider",
+      attachments.lang2vdoc[injection.langFileExt],
+      position,
+      context.triggerCharacter
+    );
+    return res;
+  }
+}
+
 // ==============================
 // Extension code
 // ==============================
@@ -281,24 +412,8 @@ export function activate(context: ExtensionContext) {
   initPyright();
   initClangd();
   // ========== Language server ==========
-  // If the extension is launched in debug mode then the debug server options are used
-  // Otherwise the run options are used
-  const serverModule = context.asAbsolutePath(
-    path.join("server", "out", "server.js")
-  );
-
-  // If the extension is launched in debug mode then the debug server options are used
-  // Otherwise the run options are used
-  const serverOptions: ServerOptions = {
-    run: { module: serverModule, transport: TransportKind.ipc },
-    debug: {
-      module: serverModule,
-      transport: TransportKind.ipc,
-    },
-  };
   const contentProvider = new (class
-    implements vscode.TextDocumentContentProvider
-  {
+    implements vscode.TextDocumentContentProvider {
     onDidChangeEmitter = new vscode.EventEmitter<vscode.Uri>();
     onDidChange = this.onDidChangeEmitter.event;
 
@@ -361,158 +476,7 @@ export function activate(context: ExtensionContext) {
     }
     documentToVirtual.delete(e.uri.toString());
   });
-  const clientOptions: LanguageClientOptions = {
-    documentSelector: [
-      { scheme: "file", language: "*" },
-      { scheme: "embedded-content", language: "*" },
-    ],
-    middleware: {
-      provideCompletionItem: async (
-        document,
-        position,
-        context,
-        token,
-        next
-      ) => {
-        const attachments = getAttachments(document.uri);
-        const injection = getInjectionAtPosition(
-          attachments.injections,
-          document.offsetAt(position)
-        );
-
-        // If not in an injection fragment, forward the request to primary LS directly
-        if (!injection) {
-          if (document.uri.scheme === "embedded-content") {
-            let endpoint: JSONRPCEndpoint;
-            let extension: string;
-            if (document.languageId === "python") {
-              endpoint = pyrightEndpoint;
-              extension = "py";
-            } else if (document.languageId === "cpp") {
-              endpoint = clangdEndpoint;
-              extension = "cpp";
-            } else {
-              return next(document, position, context, token);
-            }
-
-            // call language server
-            const doc = document.getText();
-            const muxResult = await mutex.runExclusive(async () => {
-              if (!documentInitialized.get(document.uri.toString())) {
-                console.log("Sending textDocument/didOpen");
-                documentInitialized.set(document.uri.toString(), true);
-                lastDocumentVersion.set(document.uri.toString(), 0);
-                endpoint.notify("textDocument/didOpen", {
-                  textDocument: {
-                    uri: canonUri(document.uri) + "." + extension,
-                    languageId: document.languageId,
-                    version: document.version,
-                    text: doc,
-                  },
-                });
-              } else {
-                console.log(
-                  "Sending didChange with version",
-                  lastDocumentVersion.get(document.uri.toString())
-                );
-                endpoint.notify("textDocument/didChange", {
-                  textDocument: {
-                    uri: canonUri(document.uri) + "." + extension,
-                    version: lastDocumentVersion.get(document.uri.toString()),
-                  },
-                  contentChanges: [
-                    {
-                      range: {
-                        start: { line: 0, character: 0 },
-                        end: {
-                          line:
-                            lastDocumentLength.get(document.uri.toString())
-                              .line - 1,
-                          character: lastDocumentLength.get(
-                            document.uri.toString()
-                          ).character,
-                        },
-                      },
-                      text: doc,
-                    },
-                  ],
-                });
-                lastDocumentVersion.set(
-                  document.uri.toString(),
-                  lastDocumentVersion.get(document.uri.toString()) + 1
-                );
-                await new Promise((resolve) => setTimeout(resolve, 100));
-              }
-              const lines = doc.split("\n");
-              lastDocumentLength.set(document.uri.toString(), {
-                line: lines.length,
-                character: lines[lines.length - 1].length,
-              });
-              console.log("Sent textDocument/didOpen and didChange");
-              console.log("Trying to get language server response");
-              const completionResult: { items: vscode.CompletionItem[] } =
-                await endpoint.send("textDocument/completion", {
-                  textDocument: {
-                    uri: canonUri(document.uri) + "." + extension,
-                  },
-                  position: position,
-                  context: context,
-                });
-              console.log(
-                "Language server completion result",
-                completionResult
-              );
-              return completionResult;
-            });
-
-            if (muxResult) {
-              const results: vscode.CompletionItem[] = [];
-              for (const item of muxResult.items) {
-                const it = new vscode.CompletionItem(item.label);
-                it.kind = item.kind;
-                it.sortText = item.sortText;
-                results.push(it);
-              }
-              return results;
-            }
-          }
-
-          const res = await next(document, position, context, token);
-          LOGHERE("Result was", res);
-          return res;
-        }
-
-        // const d = await workspace.openTextDocument(
-        //   attachments.lang2v c[injection.language]
-        // );
-        // await window.showTextDocument(d, { preview: false });
-
-        // Otherwise, forward to minion LS
-        const otherDoc = await workspace.openTextDocument(
-          attachments.lang2vdoc[injection.language]
-        );
-        const res = await commands.executeCommand<vscode.CompletionList>(
-          "vscode.executeCompletionItemProvider",
-          attachments.lang2vdoc[injection.langFileExt],
-          position,
-          context.triggerCharacter
-        );
-        return res;
-      },
-    },
-  };
-
-  // Create the language client and start the client.
-  theClient = new LanguageClient(
-    "lahacksDemo",
-    "C++ (Fancy)",
-    serverOptions,
-    clientOptions
-  );
-
-  // Start the client. This will also launch the server
-  theClient.start();
-
+  
   context.subscriptions.push(
     languages.registerCodeLensProvider("*", new InjectionCodeLensProvider())
   );
@@ -655,7 +619,7 @@ export function activate(context: ExtensionContext) {
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(private readonly _extensionUri: vscode.Uri) { }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -900,11 +864,7 @@ ${processedText}
 }
 
 export async function deactivate(): Promise<void> {
-  if (!theClient) {
-    console.log("No client to stop");
-    return undefined;
-  }
-  return theClient.stop();
+  return null;
 }
 
 function testParseInjections() {
