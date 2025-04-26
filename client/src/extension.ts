@@ -221,11 +221,15 @@ export function activate(context: ExtensionContext) {
       transport: TransportKind.ipc,
     },
   };
-  workspace.registerTextDocumentContentProvider("embedded-content", {
-    provideTextDocumentContent: (uri) => {
+  const contentProvider = new class implements vscode.TextDocumentContentProvider {
+    onDidChangeEmitter = new vscode.EventEmitter<vscode.Uri>();
+    onDidChange = this.onDidChangeEmitter.event;
+
+    provideTextDocumentContent(uri) {
       return virtualDocumentContents.get(withExtensionUri(uri));
-    },
-  });
+    }
+  };
+  workspace.registerTextDocumentContentProvider("embedded-content", contentProvider,);
 
   const refreshDocument = (document: TextDocument) => {
     const doc = document.getText();
@@ -263,6 +267,7 @@ export function activate(context: ExtensionContext) {
       documentToVirtual
         .get(document.uri.toString())
         ?.push(withExtensionUri(vdocUri));
+      contentProvider.onDidChangeEmitter.fire(vdocUri);
     }
   };
   workspace.onDidOpenTextDocument(refreshDocument);
