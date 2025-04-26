@@ -87,21 +87,33 @@ function filterDocContent(doc: string, regions: Iterable<Region>): string {
   return content;
 }
 
-function parseInjections(doc: string): Region[] {
-  const rx = /@LANGUAGE:([^@]*)@/g;
+interface FragmentDelims {
+  sbeg: RegExp,
+  send: RegExp,
+}
+
+// HERE BE DRAGON: RegExp.lastIndex is the only state of the matching machinery, and since this is single-threaded, we don't care about sharing RegExp objects
+const fragdelimsFor: Record<LangId, FragmentDelims> = {
+  'cpp': { sbeg: /R"""\(/g, send: /\)"""/g },
+  'python': { sbeg: /"""/g, send: /"""/g },
+  // HERE BE DRAGON: just ignore escaped \` for this demo...
+  'javascript': { sbeg: /`/g, send: /`/g },
+  'typescript': { sbeg: /`/g, send: /`/g },
+}
+
+function parseInjections(doc: string, rx: FragmentDelims): Region[] {
+  const rxInjectionTag = /@LANGUAGE:([^@]*)@/g;
   let match: RegExpExecArray;
   const regions: Region[] = [];
-  while ((match = rx.exec(doc)) !== null) {
-    const sbegRx = /R"""\(/g;
-    sbegRx.lastIndex = match.index;
-    const sbeg = sbegRx.exec(doc);
+  while ((match = rxInjectionTag.exec(doc)) !== null) {
+    rx.sbeg.lastIndex = match.index + match[0].length;
+    const sbeg = rx.sbeg.exec(doc);
     if (!sbeg) {
       return regions;
     }
 
-    const sendRx = /\)"""/g;
-    sendRx.lastIndex = sbeg.index;
-    const send = sendRx.exec(doc);
+    rx.send.lastIndex = sbeg.index + sbeg[0].length;
+    const send = rx.send.exec(doc);
     if (!send) {
       return regions;
     }
@@ -112,7 +124,7 @@ function parseInjections(doc: string): Region[] {
       end: send.index,
     });
     // Look for injection annotation after this snippet
-    rx.lastIndex = send.index;
+    rxInjectionTag.lastIndex = send.index;
   }
   return regions;
 }
@@ -178,7 +190,7 @@ export function activate(context: ExtensionContext) {
     const doc = document.getText();
     const att = getAttachments(document.uri, doc);
 
-    att.injections = parseInjections(doc);
+    att.injections = parseInjections(doc, fragdelimsFor[document.languageId]);
 
     att.lang2vdoc = {};
     const originalUri = encodeURIComponent(document.uri.toString(true));
@@ -377,7 +389,7 @@ export function activate(context: ExtensionContext) {
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(private readonly _extensionUri: vscode.Uri) { }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -629,7 +641,7 @@ export async function deactivate(): Promise<void> {
 
 function testParseInjections() {
   const i = '// @LANGUAGE: sql@\nauto s = R"""(some code here)"""';
-  const pp = parseInjections(i);
+  const pp = parseInjections(i, fragdelimsFor['cpp']);
   const sec = i.substring(pp[0].start, pp[0].end);
   return sec;
 }
