@@ -63,8 +63,15 @@ function withExtensionUri(uri: Uri): string {
   return decodeURIComponent(preStrip);
 }
 
+// js, py, cpp, etc.
+// The thing that is put into @LANGUAGE:__@ and into vdoc Uri
+type LangFileExtension = string;
+// javascript, python, cpp, etc.
+// The thing extensions & syntaxes registers to provide
+type LangId = string;
+
 interface Region {
-  language: string;
+  langFileExt: LangFileExtension;
   start: number;
   end: number;
 }
@@ -80,48 +87,58 @@ function filterDocContent(doc: string, regions: Iterable<Region>): string {
   return content;
 }
 
-function parseInjections(doc: string): Region[] {
-  const rx = /@LANGUAGE:([^@]*)@/g;
+interface FragmentDelims {
+  sbeg: RegExp,
+  send: RegExp,
+}
+
+// HERE BE DRAGON: RegExp.lastIndex is the only state of the matching machinery, and since this is single-threaded, we don't care about sharing RegExp objects
+const fragdelimsFor: Record<LangId, FragmentDelims> = {
+  'cpp': { sbeg: /R"""\(/g, send: /\)"""/g },
+  'python': { sbeg: /"""/g, send: /"""/g },
+  // HERE BE DRAGON: just ignore escaped \` for this demo...
+  'javascript': { sbeg: /`/g, send: /`/g },
+  'typescript': { sbeg: /`/g, send: /`/g },
+}
+
+function parseInjections(doc: string, rx: FragmentDelims): Region[] {
+  const rxInjectionTag = /@LANGUAGE:([^@]*)@/g;
   let match: RegExpExecArray;
   const regions: Region[] = [];
-  while ((match = rx.exec(doc)) !== null) {
-    const sbegRx = /R"""\(/g;
-    sbegRx.lastIndex = match.index;
-    const sbeg = sbegRx.exec(doc);
+  while ((match = rxInjectionTag.exec(doc)) !== null) {
+    rx.sbeg.lastIndex = match.index + match[0].length;
+    const sbeg = rx.sbeg.exec(doc);
     if (!sbeg) {
       return regions;
     }
 
-    const sendRx = /\)"""/g;
-    sendRx.lastIndex = sbeg.index;
-    const send = sendRx.exec(doc);
+    rx.send.lastIndex = sbeg.index + sbeg[0].length;
+    const send = rx.send.exec(doc);
     if (!send) {
       return regions;
     }
 
     regions.push({
-      language: match[1],
+      langFileExt: match[1],
       start: sbeg.index + sbeg[0].length,
       end: send.index,
     });
     // Look for injection annotation after this snippet
-    rx.lastIndex = send.index;
+    rxInjectionTag.lastIndex = send.index;
   }
   return regions;
 }
 
 function getAttachments(
   uri: Uri,
-  doc: string,
-  recompute: boolean
+  doc: string
 ): TextDocumentAttachments {
   let res = documentAttachments.get(uri);
-  if (res && !recompute) {
+  if (res) {
     return res;
   }
   res = {};
   documentAttachments.set(uri, res);
-  res.injections = parseInjections(doc);
   return res;
 }
 
@@ -169,22 +186,22 @@ export function activate(context: ExtensionContext) {
     },
   });
 
-  workspace.onDidOpenTextDocument((document) => {
-    LOGHERE("opened document");
+  const refreshDocument = (document: TextDocument) => {
     const doc = document.getText();
-    const att = getAttachments(document.uri, doc, true);
+    const att = getAttachments(document.uri, doc);
+
+    att.injections = parseInjections(doc, fragdelimsFor[document.languageId]);
 
     att.lang2vdoc = {};
     const originalUri = encodeURIComponent(document.uri.toString(true));
     for (const injection of att.injections) {
-      const vdocUriString = `embedded-content://${injection.language}/${originalUri}.${injection.language}`;
+      const vdocUriString = `embedded-content://${injection.langFileExt}/${originalUri}.${injection.langFileExt}`;
       const vdocUri = Uri.parse(vdocUriString);
-      att.lang2vdoc[injection.language] = vdocUri;
+      att.lang2vdoc[injection.langFileExt] = vdocUri;
     }
 
     // clear out anything existing
-    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
-      []) {
+    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) || []) {
       virtualDocumentContents.delete(prevVirtual);
     }
     // then set new ones
@@ -195,52 +212,16 @@ export function activate(context: ExtensionContext) {
         withExtensionUri(vdocUri),
         filterDocContent(
           doc,
-          att.injections.filter((x) => x.language === language)
+          att.injections.filter((x) => x.langFileExt === language)
         )
       );
       documentToVirtual
         .get(document.uri.toString())
         ?.push(withExtensionUri(vdocUri));
     }
-  });
-  workspace.onDidChangeTextDocument((e) => {
-    const document = e.document;
-    const doc = document.getText();
-    const att = getAttachments(document.uri, doc, true);
-
-    att.lang2vdoc = {};
-    const originalUri = encodeURIComponent(document.uri.toString(true));
-    for (const injection of att.injections) {
-      const vdocUriString = `embedded-content://${injection.language}/${originalUri}.${injection.language}`;
-      const vdocUri = Uri.parse(vdocUriString);
-      att.lang2vdoc[injection.language] = vdocUri;
-    }
-
-    // clear out anything existing
-    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
-      []) {
-      virtualDocumentContents.delete(prevVirtual);
-    }
-    // then set new ones
-    documentToVirtual.set(document.uri.toString(), []);
-    for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
-      virtualDocumentContents.set(
-        withExtensionUri(vdocUri),
-        filterDocContent(
-          doc,
-          att.injections.filter((x) => x.language === language)
-        )
-      );
-      documentToVirtual
-        .get(document.uri.toString())
-        ?.push(withExtensionUri(vdocUri));
-    }
-    // TODO(rtk0c): optimized incremental reparse
-    // for (const ch of e.contentChanges) {
-    //   const st = e.document.offsetAt(ch.range.start);
-    //   const ed = e.document.offsetAt(ch.range.end);
-    // }
-  });
+  };
+  workspace.onDidOpenTextDocument(refreshDocument);
+  workspace.onDidChangeTextDocument(e => refreshDocument(e.document));
 
   workspace.onDidCloseTextDocument((e) => {
     documentAttachments.delete(e.uri);
@@ -261,7 +242,7 @@ export function activate(context: ExtensionContext) {
       ) => {
         const doc = document.getText();
 
-        const attachments = getAttachments(document.uri, doc, false);
+        const attachments = getAttachments(document.uri, doc);
         const injection = getInjectionAtPosition(
           attachments.injections,
           document.offsetAt(position)
@@ -280,7 +261,7 @@ export function activate(context: ExtensionContext) {
         // Otherwise, forward to minion LS
         const res = await commands.executeCommand<vscode.CompletionList>(
           "vscode.executeCompletionItemProvider",
-          attachments.lang2vdoc[injection.language],
+          attachments.lang2vdoc[injection.langFileExt],
           position,
           context.triggerCharacter
         );
@@ -408,7 +389,7 @@ export function activate(context: ExtensionContext) {
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(private readonly _extensionUri: vscode.Uri) { }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -660,7 +641,7 @@ export async function deactivate(): Promise<void> {
 
 function testParseInjections() {
   const i = '// @LANGUAGE: sql@\nauto s = R"""(some code here)"""';
-  const pp = parseInjections(i);
+  const pp = parseInjections(i, fragdelimsFor['cpp']);
   const sec = i.substring(pp[0].start, pp[0].end);
   return sec;
 }
