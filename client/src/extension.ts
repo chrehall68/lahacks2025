@@ -46,7 +46,7 @@ function parseInjections(doc: string): Region[] {
     const send = sendRx.exec(doc);
     if (!send) { return regions; }
 
-    regions.push({ start: sbeg.index, end: send.index });
+    regions.push({ start: sbeg.index + sbeg[0].length, end: send.index });
     // Look for injection annotation after this snippet
     rx.lastIndex = send.index;
   }
@@ -54,12 +54,14 @@ function parseInjections(doc: string): Region[] {
 }
 
 export function activate(context: ExtensionContext) {
+  testParseInjections();
+
+  
   // If the extension is launched in debug mode then the debug server options are used
   // Otherwise the run options are used
   const serverOptions: ServerOptions = {
     command: 'clangd',
   };
-  const pp = parseInjections("// @LANGUAGE: sql@\nauto s = R\"\"\"(some code here)\"\"\"");
 
   workspace.registerTextDocumentContentProvider('embedded-content', {
     provideTextDocumentContent: uri => {
@@ -125,4 +127,15 @@ export async function deactivate(): Promise<void> {
     return undefined;
   }
   return theClient.stop();
+}
+
+
+
+
+
+function testParseInjections() {
+  const i = "// @LANGUAGE: sql@\nauto s = R\"\"\"(some code here)\"\"\"";
+  const pp = parseInjections(i);
+  const sec = i.substring(pp[0].start, pp[0].end);
+  return sec;
 }
