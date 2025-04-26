@@ -143,7 +143,6 @@ export function getCSSVirtualContent(
 	return content;
 }
 
-
 export function getDocumentRegions(
 	languageService: LanguageService,
 	document: TextDocument

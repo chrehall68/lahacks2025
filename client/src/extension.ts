@@ -121,32 +121,70 @@ export function activate(context: ExtensionContext) {
   );
 
   // callback for the command
-  context.subscriptions.push(
-    commands.registerCommand(
-      "quickfixSidebar.show",
-      async (contextArg: { uri: string; diagnostic: vscode.Diagnostic }) => {
-        lastFixContext = contextArg.uri;
-        LOGHERE("lastFixContext", lastFixContext, contextArg.diagnostic);
-        // Call Gemini API using the ai client
-        // TODO(rtk0c): prompt engineer better
-        const result = await ai.models.generateContent({
-          model: "gemini-2.0-flash",
-          contents:
-            "Explain this diagnostic. Keep your response to roughly 1 paragraph. Diagnostic: " +
-            contextArg.diagnostic.message,
-        });
-        const explanation = result.candidates[0].content.parts[0].text;
+context.subscriptions.push(
+  commands.registerCommand(
+    "quickfixSidebar.show",
+    async (contextArg: { uri: string; diagnostic: vscode.Diagnostic }) => {
+      lastFixContext = contextArg.uri;
+      LOGHERE("lastFixContext", lastFixContext, contextArg.diagnostic);
 
-        // Set the content of the view
-        const html = converter.makeHtml(explanation);
-        quickfixProvider.currentWebview.html = `<p>${html}</p>`;
-        // Open the view
-        await vscode.commands.executeCommand(
-          "workbench.view.extension.quickfixSidebar"
-        );
-      }
-    )
-  );
+      // Call Gemini API using the ai client
+      const result = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents:
+          "Explain this diagnostic. Keep your response to roughly 1 paragraph. Diagnostic: " +
+          contextArg.diagnostic.message,
+      });
+
+      const explanation = result.candidates[0].content.parts[0].text;
+
+      // Set the content of the view FIRST
+      const html = converter.makeHtml(explanation);
+      quickfixProvider.currentWebview.html = `
+        <div>
+          <p>${html}</p>
+          <div id="buttonContainer"></div>
+
+          <script>
+            const vscode = acquireVsCodeApi();
+            window.addEventListener('message', event => {
+              const message = event.data;
+              switch (message.command) {
+                case 'showAddChangesButton':
+                  createAddChangesButton();
+                  break;
+                case 'hideAddChangesButton':
+                  clearAddChangesButton();
+                  break;
+              }
+            });
+
+            function createAddChangesButton() {
+              const container = document.getElementById('buttonContainer');
+              container.innerHTML = '<button id="addChangesButton">Add Changes</button>';
+              document.getElementById('addChangesButton').addEventListener('click', () => {
+                vscode.postMessage({ command: 'addChanges' });
+              });
+            }
+
+            function clearAddChangesButton() {
+              const container = document.getElementById('buttonContainer');
+              container.innerHTML = '';
+            }
+          </script>
+        </div>
+      `;
+
+      // Open the view
+      await vscode.commands.executeCommand(
+        "workbench.view.extension.quickfixSidebar"
+      );
+
+      // THEN post the message to show the button
+      quickfixProvider.currentWebview?.postMessage({ command: 'showAddChangesButton' });
+    }
+  )
+);
 
   // this fn is called whenever diagnostics change
   // so inside we want to get the list of diagnostics and
@@ -179,13 +217,55 @@ class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
-
+    webviewView.webview.onDidReceiveMessage(message => {
+      switch (message.command) {
+        case 'addChanges':
+          vscode.window.showInformationMessage('Add Changes button clicked!');
+          // TODO: implement actual logic for "Add Changes" here
+          break;
+      }
+    });
     // Save reference for updating later
     this.currentWebview = webviewView.webview;
   }
 
   getHtmlForWebview(webview: vscode.Webview): string {
-    return "<div>Press The QuickFix Explain item to see the explanation for a diagnostic here</div>";
+    return `
+      <div>
+        <p>Press The QuickFix Explain item to see the explanation for a diagnostic here</p>
+        <div id="buttonContainer"></div>
+      </div>
+
+      <script>
+        const vscode = acquireVsCodeApi();
+
+        window.addEventListener('message', event => {
+          const message = event.data;
+          switch (message.command) {
+            case 'showAddChangesButton':
+              createAddChangesButton();
+              break;
+            case 'hideAddChangesButton':
+              clearAddChangesButton();
+              break;
+          }
+        });
+
+        function createAddChangesButton() {
+          const container = document.getElementById('buttonContainer');
+          container.innerHTML = '<button id="addChangesButton">Add Changes</button>';
+
+          document.getElementById('addChangesButton').addEventListener('click', () => {
+            vscode.postMessage({ command: 'addChanges' });
+          });
+        }
+
+        function clearAddChangesButton() {
+          const container = document.getElementById('buttonContainer');
+          container.innerHTML = '';
+        }
+      </script>
+    `;
   }
 
   public currentWebview?: vscode.Webview;
