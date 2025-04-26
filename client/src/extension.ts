@@ -63,8 +63,15 @@ function withExtensionUri(uri: Uri): string {
   return decodeURIComponent(preStrip);
 }
 
+// js, py, cpp, etc.
+// The thing that is put into @LANGUAGE:__@ and into vdoc Uri
+type LangFileExtension = string;
+// javascript, python, cpp, etc.
+// The thing extensions & syntaxes registers to provide
+type LangId = string;
+
 interface Region {
-  language: string;
+  langFileExt: LangFileExtension;
   start: number;
   end: number;
 }
@@ -100,7 +107,7 @@ function parseInjections(doc: string): Region[] {
     }
 
     regions.push({
-      language: match[1],
+      langFileExt: match[1],
       start: sbeg.index + sbeg[0].length,
       end: send.index,
     });
@@ -112,16 +119,14 @@ function parseInjections(doc: string): Region[] {
 
 function getAttachments(
   uri: Uri,
-  doc: string,
-  recompute: boolean
+  doc: string
 ): TextDocumentAttachments {
   let res = documentAttachments.get(uri);
-  if (res && !recompute) {
+  if (res) {
     return res;
   }
   res = {};
   documentAttachments.set(uri, res);
-  res.injections = parseInjections(doc);
   return res;
 }
 
@@ -169,22 +174,22 @@ export function activate(context: ExtensionContext) {
     },
   });
 
-  workspace.onDidOpenTextDocument((document) => {
-    LOGHERE("opened document");
+  const refreshDocument = (document: TextDocument) => {
     const doc = document.getText();
-    const att = getAttachments(document.uri, doc, true);
+    const att = getAttachments(document.uri, doc);
+
+    att.injections = parseInjections(doc);
 
     att.lang2vdoc = {};
     const originalUri = encodeURIComponent(document.uri.toString(true));
     for (const injection of att.injections) {
-      const vdocUriString = `embedded-content://${injection.language}/${originalUri}.${injection.language}`;
+      const vdocUriString = `embedded-content://${injection.langFileExt}/${originalUri}.${injection.langFileExt}`;
       const vdocUri = Uri.parse(vdocUriString);
-      att.lang2vdoc[injection.language] = vdocUri;
+      att.lang2vdoc[injection.langFileExt] = vdocUri;
     }
 
     // clear out anything existing
-    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
-      []) {
+    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) || []) {
       virtualDocumentContents.delete(prevVirtual);
     }
     // then set new ones
@@ -195,52 +200,16 @@ export function activate(context: ExtensionContext) {
         withExtensionUri(vdocUri),
         filterDocContent(
           doc,
-          att.injections.filter((x) => x.language === language)
+          att.injections.filter((x) => x.langFileExt === language)
         )
       );
       documentToVirtual
         .get(document.uri.toString())
         ?.push(withExtensionUri(vdocUri));
     }
-  });
-  workspace.onDidChangeTextDocument((e) => {
-    const document = e.document;
-    const doc = document.getText();
-    const att = getAttachments(document.uri, doc, true);
-
-    att.lang2vdoc = {};
-    const originalUri = encodeURIComponent(document.uri.toString(true));
-    for (const injection of att.injections) {
-      const vdocUriString = `embedded-content://${injection.language}/${originalUri}.${injection.language}`;
-      const vdocUri = Uri.parse(vdocUriString);
-      att.lang2vdoc[injection.language] = vdocUri;
-    }
-
-    // clear out anything existing
-    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
-      []) {
-      virtualDocumentContents.delete(prevVirtual);
-    }
-    // then set new ones
-    documentToVirtual.set(document.uri.toString(), []);
-    for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
-      virtualDocumentContents.set(
-        withExtensionUri(vdocUri),
-        filterDocContent(
-          doc,
-          att.injections.filter((x) => x.language === language)
-        )
-      );
-      documentToVirtual
-        .get(document.uri.toString())
-        ?.push(withExtensionUri(vdocUri));
-    }
-    // TODO(rtk0c): optimized incremental reparse
-    // for (const ch of e.contentChanges) {
-    //   const st = e.document.offsetAt(ch.range.start);
-    //   const ed = e.document.offsetAt(ch.range.end);
-    // }
-  });
+  };
+  workspace.onDidOpenTextDocument(refreshDocument);
+  workspace.onDidChangeTextDocument(e => refreshDocument(e.document));
 
   workspace.onDidCloseTextDocument((e) => {
     documentAttachments.delete(e.uri);
@@ -261,7 +230,7 @@ export function activate(context: ExtensionContext) {
       ) => {
         const doc = document.getText();
 
-        const attachments = getAttachments(document.uri, doc, false);
+        const attachments = getAttachments(document.uri, doc);
         const injection = getInjectionAtPosition(
           attachments.injections,
           document.offsetAt(position)
@@ -280,7 +249,7 @@ export function activate(context: ExtensionContext) {
         // Otherwise, forward to minion LS
         const res = await commands.executeCommand<vscode.CompletionList>(
           "vscode.executeCompletionItemProvider",
-          attachments.lang2vdoc[injection.language],
+          attachments.lang2vdoc[injection.langFileExt],
           position,
           context.triggerCharacter
         );
