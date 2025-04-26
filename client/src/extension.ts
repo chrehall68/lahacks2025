@@ -1,8 +1,3 @@
-/* --------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
- * ------------------------------------------------------------------------------------------ */
-
 import { GoogleGenAI } from "@google/genai";
 import * as vscode from "vscode";
 import {
@@ -25,7 +20,7 @@ import {
   workspace,
 } from "vscode";
 
-import { LanguageClient } from "vscode-languageclient";
+import { LanguageClient, MarkedString } from "vscode-languageclient";
 
 function LOGHERE(...args) {
   console.log("[LAHACKS2025]", ...args);
@@ -40,7 +35,7 @@ let geminiApiKey: string;
 let ai: GoogleGenAI;
 let lastFixContext: string;
 let fixes: CodeAction[];
-let quickfixProvider: DepNodeProvider;
+let quickfixProvider: DummyProvider;
 let quickfixTree: vscode.TreeView<TreeItem>;
 
 export function activate(context: ExtensionContext) {
@@ -120,10 +115,7 @@ export function activate(context: ExtensionContext) {
       }
     )
   );
-  quickfixProvider = new DepNodeProvider(() => lastFixContext);
-  // context.subscriptions.push(
-  //   window.registerTreeDataProvider("quickfixSidebarView", quickfixProvider)
-  // );
+  quickfixProvider = new DummyProvider();
   quickfixTree = window.createTreeView("quickfixSidebarView", {
     treeDataProvider: quickfixProvider,
   });
@@ -134,9 +126,25 @@ export function activate(context: ExtensionContext) {
   context.subscriptions.push(
     commands.registerCommand(
       "quickfixSidebar.show",
-      (contextArg: { uri: string }) => {
+      async (contextArg: { uri: string; diagnostic: vscode.Diagnostic }) => {
         lastFixContext = contextArg.uri;
-        LOGHERE("lastFixContext", lastFixContext);
+        LOGHERE("lastFixContext", lastFixContext, contextArg.diagnostic);
+        // Call Gemini API using the ai client
+        const result = await ai.models.generateContent({
+          model: "gemini-2.0-flash",
+          contents:
+            "Explain this diagnostic. Do not use markdown. Keep your response to roughly 1 paragraph. Diagnostic: " +
+            contextArg.diagnostic.message,
+        });
+        const explanation = MarkedString.fromPlainText(
+          result.candidates[0].content.parts[0].text
+        );
+
+        // TODO - actually use html or markdown instead of just plain text...
+        quickfixTree.message = `Explanation for diagnostic\n\nDiagnostic:\n ${contextArg.diagnostic.message}\n\nExplanation:\n ${explanation}`;
+        quickfixTree.reveal(quickfixProvider.getTreeItem(new MyItem()), {
+          select: false,
+        });
       }
     )
   );
@@ -151,17 +159,14 @@ export function activate(context: ExtensionContext) {
   });
 }
 
-export class DepNodeProvider implements TreeDataProvider<TreeItem> {
+/**
+ * Provider that literally does nothing. Main purpose is so that
+ * we can make a tree view and use its message field
+ */
+export class DummyProvider implements TreeDataProvider<TreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<
     TreeItem | undefined | void
   > = new vscode.EventEmitter<TreeItem | undefined | void>();
-  //readonly onDidChangeTreeData: vscode.Event<TreeItem | undefined | void> =
-  //  this._onDidChangeTreeData.event;
-  private _thingy;
-
-  constructor(private thingy: () => string | undefined) {
-    this._thingy = thingy;
-  }
 
   refresh(): void {
     this._onDidChangeTreeData.fire();
@@ -171,8 +176,16 @@ export class DepNodeProvider implements TreeDataProvider<TreeItem> {
     return element;
   }
 
+  // this is also kinda useless
+  // since we manually edit the message
   getChildren(element?: TreeItem): Thenable<TreeItem[]> {
-    return Promise.resolve([new MyItem()]);
+    return Promise.resolve([]);
+  }
+
+  // literally useless
+  // just needed that way I can do .reveal()
+  getParent(element: vscode.TreeItem): vscode.ProviderResult<vscode.TreeItem> {
+    return null;
   }
 }
 
@@ -222,7 +235,7 @@ async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
       fix.command = {
         title: "Explain",
         command: "quickfixSidebar.show",
-        arguments: [{ uri: uri.toString() }],
+        arguments: [{ uri: uri.toString(), diagnostic: diagnostic }],
       };
       LOGHERE("made fix", fix);
       fixes.push(fix);
