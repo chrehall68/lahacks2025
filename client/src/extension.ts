@@ -129,10 +129,7 @@ function parseInjections(doc: string, rx: FragmentDelims): Region[] {
   return regions;
 }
 
-function getAttachments(
-  uri: Uri,
-  doc: string
-): TextDocumentAttachments {
+function getAttachments(uri: Uri): TextDocumentAttachments {
   let res = documentAttachments.get(uri);
   if (res) {
     return res;
@@ -188,7 +185,7 @@ export function activate(context: ExtensionContext) {
 
   const refreshDocument = (document: TextDocument) => {
     const doc = document.getText();
-    const att = getAttachments(document.uri, doc);
+    const att = getAttachments(document.uri);
 
     att.injections = parseInjections(doc, fragdelimsFor[document.languageId]);
 
@@ -240,9 +237,7 @@ export function activate(context: ExtensionContext) {
         token,
         next
       ) => {
-        const doc = document.getText();
-
-        const attachments = getAttachments(document.uri, doc);
+        const attachments = getAttachments(document.uri);
         const injection = getInjectionAtPosition(
           attachments.injections,
           document.offsetAt(position)
