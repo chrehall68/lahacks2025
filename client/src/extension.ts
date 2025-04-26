@@ -17,8 +17,11 @@ import {
   workspace,
 } from "vscode";
 
+import { Mutex } from "async-mutex";
+import { spawn } from "child_process";
 import * as path from "path";
 import * as showdown from "showdown";
+import { JSONRPCEndpoint } from "ts-lsp-client";
 import {
   LanguageClient,
   LanguageClientOptions,
@@ -33,6 +36,8 @@ function LOGHERE(...args) {
 // ==============================
 //  Globals
 // ==============================
+const documentInitialized = new Map<string, boolean>();
+const lastDocumentVersion = new Map<string, number>();
 const documentAttachments = new Map<Uri, TextDocumentAttachments>();
 const virtualDocumentContents = new Map<string, string>();
 const documentToVirtual = new Map<string, string[]>();
@@ -43,6 +48,8 @@ let fixes: CodeAction[];
 let ai: GoogleGenAI;
 let quickfixProvider: DiagnosticAggregatorViewProvider;
 let AIPoweredDiagnostics: vscode.DiagnosticCollection;
+let pyrightEndpoint: JSONRPCEndpoint;
+let mutex = new Mutex();
 
 // ==============================
 //  Language server code
@@ -144,9 +151,23 @@ function getInjectionAtPosition(
 // ==============================
 // Extension code
 // ==============================
-export function activate(context: ExtensionContext) {
-  testParseInjections();
+function initPyright() {
+  const serverProcess = spawn(
+    "/home/eliot/.local/share/nvim/mason/bin/pyright-langserver",
+    ["--stdio"]
+  );
+  console.log("starting pyright");
+  pyrightEndpoint = new JSONRPCEndpoint(
+    serverProcess.stdin!,
+    serverProcess.stdout!
+  );
 
+  pyrightEndpoint.notify("initialized");
+
+  console.log("finished starting pyright");
+}
+export function activate(context: ExtensionContext) {
+  initPyright();
   // ========== Language server ==========
   // If the extension is launched in debug mode then the debug server options are used
   // Otherwise the run options are used
@@ -241,16 +262,11 @@ export function activate(context: ExtensionContext) {
     //   const ed = e.document.offsetAt(ch.range.end);
     // }
   });
-
-  workspace.onDidCloseTextDocument((e) => {
-    documentAttachments.delete(e.uri);
-    for (const vdocUri of documentToVirtual.get(e.uri.toString())) {
-      virtualDocumentContents.delete(vdocUri);
-    }
-    documentToVirtual.delete(e.uri.toString());
-  });
   const clientOptions: LanguageClientOptions = {
-    documentSelector: ["*"],
+    documentSelector: [
+      { scheme: "file", language: "*" },
+      { scheme: "embedded-content", language: "*" },
+    ],
     middleware: {
       provideCompletionItem: async (
         document,
@@ -269,7 +285,75 @@ export function activate(context: ExtensionContext) {
 
         // If not in an injection fragment, forward the request to primary LS directly
         if (!injection) {
-          return await next(document, position, context, token);
+          if (document.uri.scheme === "embedded-content") {
+            // call pyright
+            const muxResult = await mutex.runExclusive(async () => {
+              if (!documentInitialized.get(document.uri.toString())) {
+                console.log("Sending textDocument/didOpen");
+                documentInitialized.set(document.uri.toString(), true);
+                lastDocumentVersion.set(document.uri.toString(), 0);
+                pyrightEndpoint.notify("textDocument/didOpen", {
+                  textDocument: {
+                    uri: document.uri.toString(),
+                    languageId: document.languageId,
+                    version: document.version,
+                    text: doc,
+                  },
+                });
+              } else {
+                console.log(
+                  "Sending didChange with version",
+                  lastDocumentVersion.get(document.uri.toString())
+                );
+                pyrightEndpoint.notify("textDocument/didChange", {
+                  textDocument: {
+                    uri: document.uri.toString(),
+                    version: lastDocumentVersion.get(document.uri.toString()),
+                  },
+                  contentChanges: [
+                    {
+                      range: {
+                        start: { line: 0, character: 0 },
+                        end: { line: 100000, character: 10000 },
+                      },
+                      text: doc,
+                    },
+                  ],
+                });
+                lastDocumentVersion.set(
+                  document.uri.toString(),
+                  lastDocumentVersion.get(document.uri.toString()) + 1
+                );
+              }
+              console.log("Sent textDocument/didOpen and didChange");
+              console.log("Trying to get pyright response");
+              const completionResult: { items: vscode.CompletionItem[] } =
+                await pyrightEndpoint.send("textDocument/completion", {
+                  textDocument: {
+                    uri: document.uri.toString(),
+                  },
+                  position: position,
+                  context: context,
+                });
+              console.log("Pyright completion result", completionResult);
+              return completionResult;
+            });
+
+            if (muxResult) {
+              const results: vscode.CompletionItem[] = [];
+              for (const item of muxResult.items) {
+                const it = new vscode.CompletionItem(item.label);
+                it.kind = item.kind;
+                it.sortText = item.sortText;
+                results.push(it);
+              }
+              return results;
+            }
+          }
+
+          const res = await next(document, position, context, token);
+          LOGHERE("Result was", res);
+          return res;
         }
 
         // const d = await workspace.openTextDocument(
@@ -278,6 +362,9 @@ export function activate(context: ExtensionContext) {
         // await window.showTextDocument(d, { preview: false });
 
         // Otherwise, forward to minion LS
+        const otherDoc = await workspace.openTextDocument(
+          attachments.lang2vdoc[injection.language]
+        );
         const res = await commands.executeCommand<vscode.CompletionList>(
           "vscode.executeCompletionItemProvider",
           attachments.lang2vdoc[injection.language],
