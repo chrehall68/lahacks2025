@@ -398,21 +398,29 @@ async function makeAIPoweredDiagnostics(doc: TextDocument): Promise<void> {
     })
     .join("\n");
 
-  const prompt = `You are acting as a senior developer giving diagnostics. Your role is to output diagnostics based on the following code. The diagnostics should take into account things that a normal language server can't take into account (IE doing \`in\` on a python list is much slower than doing it on a set, suggesting that two nested for loops might be able to be optimized into one loop if some trick is used, suggesting that Python classes shouldn't use getters and setters, or any other thing that a senior developer would know about and a normal language server wouldn't). The diagnostics should be of the format:
-type Position {
-  line: number,
-  character: number
-}
-type Range {
-  start: Position,
-  end: Position,
-}
+  const prompt = `You are acting as a senior developer giving diagnostics. 
+  Your role is to output diagnostics based on the following code. 
+  The diagnostics should take into account things that a normal language 
+  server can't take into account (IE doing \`in\` on a python list is much slower 
+  than doing it on a set, suggesting that two nested for loops might be able to 
+  be optimized into one loop if some trick is used, suggesting that Python classes
+  shouldn't use getters and setters, or any other thing that a senior developer 
+  would know about and a normal language server wouldn't). 
+  The diagnostics should be of the format:
+
+type error_string: string where error occurs
+
 type Diagnostic {
-  range: Range,
+  toHighlight: error_string,
   message: string,
+  lineStart: number,
+  lineEnd: number,
 }
 
-Please note that the line numbers and column numbers are zero indexed, and that the code has been formatted to make it easy to read. Each line is in the format {line}|{lineText}
+Please note that the error_string will be regex matched exactly,
+so the error string in diagnostic must exactly match the string
+where the error is occuring in the original text. For example, if 
+the error spans multiple lines, the newLine escape character must be used.
 
 Code:
 \`\`\`
@@ -430,47 +438,26 @@ ${processedText}
         items: {
           type: Type.OBJECT,
           properties: {
-            range: {
-              type: Type.OBJECT,
-              properties: {
-                start: {
-                  type: Type.OBJECT,
-                  properties: {
-                    line: { type: Type.NUMBER },
-                    character: { type: Type.NUMBER },
-                  },
-                  required: ["line", "character"],
-                },
-                end: {
-                  type: Type.OBJECT,
-                  properties: {
-                    line: { type: Type.NUMBER },
-                    character: { type: Type.NUMBER },
-                  },
-                  required: ["line", "character"],
-                },
-              },
-              required: ["start", "end"],
-            },
+            toHighlight: { type: Type.STRING },
             message: { type: Type.STRING },
+            lineStart: { type: Type.NUMBER },
+            lineEnd: { type: Type.NUMBER },
           },
-          required: ["range", "message"],
+          required: ["toHighlight", "message", "lineStart", "lineEnd"],
         },
       },
     },
   });
   const diagnosticsText = response.text;
   console.log("diagnosticsText", diagnosticsText);
-  const preDiagnostics: { range: Range; message: string }[] =
-    JSON.parse(diagnosticsText);
+  const preDiagnostics: {
+    toHighlight: string;
+    message: string;
+    lineStart: number;
+    lineEnd: number;
+  }[] = JSON.parse(diagnosticsText);
 
-  const diagnostics: Diagnostic[] = preDiagnostics.map((d) => {
-    return {
-      range: d.range,
-      message: d.message,
-      severity: vscode.DiagnosticSeverity.Warning,
-    };
-  });
+  const diagnostics = createDiagnostics(doc, preDiagnostics);
   console.log("diagnostics", diagnostics);
 
   AIPoweredDiagnostics.set(doc.uri, diagnostics);
@@ -488,4 +475,63 @@ function testParseInjections() {
   const pp = parseInjections(i);
   const sec = i.substring(pp[0].start, pp[0].end);
   return sec;
+}
+
+function createDiagnostics(
+  document: vscode.TextDocument,
+  preDiagnostics
+): vscode.Diagnostic[] {
+  const diagnostics: vscode.Diagnostic[] = [];
+
+  for (const d of preDiagnostics) {
+    const startPosition = new vscode.Position(d.lineStart, 0);
+    const endLine = Math.min(d.lineEnd, document.lineCount - 1);
+    const endPosition = document.lineAt(endLine).range.end;
+
+    const scopedText = document.getText(
+      new vscode.Range(startPosition, endPosition)
+    );
+
+    // regex search inside the scoped text
+    const regex = new RegExp(
+      d.toHighlight.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      "g"
+    ); // escape regex
+    const match = regex.exec(scopedText);
+
+    if (match && match.index !== undefined) {
+      const startOffset = match.index;
+      const endOffset = startOffset + match[0].length;
+
+      const absoluteStartOffset =
+        document.offsetAt(startPosition) + startOffset;
+      const absoluteEndOffset = document.offsetAt(startPosition) + endOffset;
+
+      const absoluteStartPos = document.positionAt(absoluteStartOffset);
+      const absoluteEndPos = document.positionAt(absoluteEndOffset);
+
+      const range = new vscode.Range(absoluteStartPos, absoluteEndPos);
+
+      diagnostics.push(
+        new vscode.Diagnostic(
+          range,
+          d.message,
+          vscode.DiagnosticSeverity.Warning
+        )
+      );
+    } else {
+      console.warn(
+        `Could not find match for: ${d.toHighlight} between lines ${d.lineStart} and ${d.lineEnd}`
+      );
+    }
+  }
+
+  return diagnostics;
+}
+
+function positionAt(text: string, offset: number): vscode.Position {
+  const lines = text.slice(0, offset).split("\n");
+  const line = lines.length - 1;
+  const character = lines[lines.length - 1].length;
+  return new vscode.Position(line, character);
 }
