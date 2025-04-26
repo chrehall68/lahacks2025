@@ -15,15 +15,15 @@
     "vscode": "^1.74.0"
   },
   "activationEvents": [
-    "*"
+    "onLanguage:cpp"
   ],
   "main": "./client/out/extension",
   "scripts": {
-    "vscode:prepublish": "cd client && npm install && cd .. && npm run compile",
+    "vscode:prepublish": "cd client && pnpm install && cd .. && pnpm run compile",
     "compile": "tsc -b",
     "watch": "tsc -b -w",
     "lint": "eslint",
-    "postinstall": "cd client && npm install && cd ../server && npm install && cd .."
+    "postinstall": "cd client && pnpm install"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",
@@ -33,8 +33,5 @@
     "eslint": "^9.13.0",
     "typescript": "^5.8.2",
     "typescript-eslint": "^8.26.0"
-  },
-  "dependencies": {
-    "@google/genai": "^0.10.0"
   }
 }

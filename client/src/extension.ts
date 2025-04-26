@@ -1,141 +1,128 @@
-/* --------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
- * ------------------------------------------------------------------------------------------ */
-
-import { GoogleGenAI } from "@google/genai";
+/* eslint-disable @typescript-eslint/no-unused-vars */
+import * as path from 'path';
 import {
-  Diagnostic,
+  commands,
+  CompletionList,
   ExtensionContext,
-  languages,
   Uri,
-  window,
   workspace,
 } from "vscode";
-import { LanguageClient } from "vscode-languageclient";
+import { LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient";
 
-function LOGHERE(...args) {
-  console.log("[LAHACKS2025]", ...args);
+const virtualDocumentContents = new Map<string, string>();
+
+let theClient: LanguageClient;
+
+function canonUri(uri: Uri): string {
+  const originalUri = uri.path.slice(1).slice(0, -4);
+  return decodeURIComponent(originalUri);
 }
 
-let client: LanguageClient;
+interface Region {
+  start: number;
+  end: number;
+}
 
-// Globals
-// const htmlLanguageService = getLanguageService();
+function filterDocContent(doc: string, regions: Region[]): string {
+  let content = doc.replace(/[^\n]/g, ' ');
+  for (const r of regions) {
+    content = content.slice(0, r.start) + doc.slice(r.start, r.end) + content.slice(r.end);
+  }
+  return content;
+}
 
-let geminiApiKey: string;
-let ai: GoogleGenAI;
+function parseInjections(doc: string): Region[] {
+  const rx = /@LANGUAGE:([^@]*)@/g;
+  let match: RegExpExecArray;
+  const regions: Region[] = [];
+  while ((match = rx.exec(doc)) !== null) {
+    const sbegRx = /R"""\(/g;
+    sbegRx.lastIndex = match.index;
+    const sbeg = sbegRx.exec(doc);
+    if (!sbeg) { return regions; }
+
+    const sendRx = /\)"""/g;
+    sendRx.lastIndex = sbeg.index;
+    const send = sendRx.exec(doc);
+    if (!send) { return regions; }
+
+    regions.push({ start: sbeg.index, end: send.index });
+    // Look for injection annotation after this snippet
+    rx.lastIndex = send.index;
+  }
+  return regions;
+}
 
 export function activate(context: ExtensionContext) {
-  // // The server is implemented in node
-  // const serverModule = context.asAbsolutePath(path.join('server', 'out', 'server.js'));
+  // If the extension is launched in debug mode then the debug server options are used
+  // Otherwise the run options are used
+  const serverOptions: ServerOptions = {
+    command: 'clangd',
+  };
+  const pp = parseInjections("// @LANGUAGE: sql@\nauto s = R\"\"\"(some code here)\"\"\"");
 
-  // // If the extension is launched in debug mode then the debug server options are used
-  // // Otherwise the run options are used
-  // const serverOptions: ServerOptions = {
-  // 	run: { module: serverModule, transport: TransportKind.ipc },
-  // 	debug: {
-  // 		module: serverModule,
-  // 		transport: TransportKind.ipc,
-  // 	}
-  // };
-
-  // const virtualDocumentContents = new Map<string, string>();
-
-  // workspace.registerTextDocumentContentProvider('embedded-content', {
-  // 	provideTextDocumentContent: uri => {
-  // 		const originalUri = uri.path.slice(1).slice(0, -4);
-  // 		const decodedUri = decodeURIComponent(originalUri);
-  // 		return virtualDocumentContents.get(decodedUri);
-  // 	}
-  // });
-
-  // const clientOptions: LanguageClientOptions = {
-  // 	documentSelector: [{ scheme: 'file', language: 'html1' }],
-  // 	middleware: {
-  // 		provideCompletionItem: async (document, position, context, token, next) => {
-  // 			// If not in `<style>`, do not perform request forwarding
-  // 			if (!isInsideStyleRegion(htmlLanguageService, document.getText(), document.offsetAt(position))) {
-  // 				return await next(document, position, context, token);
-  // 			}
-
-  // 			const originalUri = document.uri.toString(true);
-  // 			virtualDocumentContents.set(originalUri, getCSSVirtualContent(htmlLanguageService, document.getText()));
-
-  // 			const vdocUriString = `embedded-content://css/${encodeURIComponent(
-  // 				originalUri
-  // 			)}.css`;
-  // 			const vdocUri = Uri.parse(vdocUriString);
-  // 			return await commands.executeCommand<CompletionList>(
-  // 				'vscode.executeCompletionItemProvider',
-  // 				vdocUri,
-  // 				position,
-  // 				context.triggerCharacter
-  // 			);
-  // 		}
-  // 	}
-  // };
-
-  // // Create the language client and start the client.
-  // client = new LanguageClient(
-  // 	'languageServerExample',
-  // 	'Language Server Example',
-  // 	serverOptions,
-  // 	clientOptions
-  // );
-
-  // // Start the client. This will also launch the server
-  // client.start();
-
-  // FIXME(rtk0c): don't read env var in prod, here in dev it's easier than changing a json config file in the slave vscode
-  geminiApiKey =
-    workspace.getConfiguration().get("lahacks2025.geminiApiKey") ||
-    process.env["GEMINI_API"];
-  ai = new GoogleGenAI({ apiKey: geminiApiKey });
-
-  // this fn is called whenever diagnostics change
-  // so inside we want to get the list of diagnostics and
-  // get an explanation for why each of them occurred
-  // we should probably do thi as send a message to
-  // gemini to explain the diagnostics
-  languages.onDidChangeDiagnostics((e) => {
-    explainDiag(languages.getDiagnostics());
+  workspace.registerTextDocumentContentProvider('embedded-content', {
+    provideTextDocumentContent: uri => {
+      return virtualDocumentContents.get(canonUri(uri));
+    }
   });
-}
 
-async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
-  for (const v of diagnostics) {
-    const [uri, diagnostics] = v;
-    // const coll = languages.createDiagnosticCollection();
-    for (const diagnostic of diagnostics) {
-      // TODO(rtk0c): prompt engineer better
-      const question = `Explain this diagnostic: ${diagnostic.message} (Source: ${diagnostic.source}, Code: ${diagnostic.code})`;
-      const answer = await window.showInformationMessage(question, "Explain");
-      if (answer === "Explain") {
-        try {
-          // Call Gemini API using the ai client
-          const result = await ai.models.generateContent({
-            model: "gemini-2.0-flash",
-            contents: question,
-          });
-          LOGHERE("diagnostic", diagnostic);
-          LOGHERE(result);
-          const explanation = result.candidates[0].content.parts[0].text;
-          window.showInformationMessage(
-            `Explanation for: ${diagnostic.message} - ${explanation}`
-          );
-        } catch (error) {
-          window.showErrorMessage(`Error explaining diagnostic: ${error}`);
+  workspace.onDidChangeTextDocument(e => {
+    for (const ch of e.contentChanges) {
+      const st = e.document.offsetAt(ch.range.start);
+      const ed = e.document.offsetAt(ch.range.end);
+
+    }
+  });
+
+  workspace.onDidCloseTextDocument(e => {
+    virtualDocumentContents.delete(canonUri(e.uri));
+  });
+
+  const clientOptions: LanguageClientOptions = {
+    documentSelector: [{ scheme: 'file', language: 'cpp' }],
+    middleware: {
+      provideCompletionItem: async (document, position, context, token, next) => {
+        const injectionLang = "";
+        // !isInsideStyleRegion(htmlLanguageService, document.getText(), document.offsetAt(position))
+
+        // If not in an injection fragment, forward the request to primary LS directly
+        if (!injectionLang) {
+          return await next(document, position, context, token);
         }
+
+        // Otherwise, forward to minion LS
+        const originalUri = encodeURIComponent(document.uri.toString(true));
+        // TODO
+        virtualDocumentContents.set(originalUri, "");
+
+        const vdocUriString = `embedded-content://${injectionLang}/${originalUri}.${injectionLang}`;
+        const vdocUri = Uri.parse(vdocUriString);
+        return await commands.executeCommand<CompletionList>(
+          'vscode.executeCompletionItemProvider',
+          vdocUri,
+          position,
+          context.triggerCharacter
+        );
       }
     }
-  }
+  };
+
+  // Create the language client and start the client.
+  theClient = new LanguageClient(
+    'lahacksDemo',
+    'C++ (Fancy)',
+    serverOptions,
+    clientOptions
+  );
+
+  // Start the client. This will also launch the server
+  theClient.start();
 }
 
 export async function deactivate(): Promise<void> {
-  // if (!client) {
-  // 	return undefined;
-  // }
-  // return client.stop();
-  return undefined;
+  if (!theClient) {
+    return undefined;
+  }
+  return theClient.stop();
 }
