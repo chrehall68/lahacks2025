@@ -4,14 +4,27 @@
  * ------------------------------------------------------------------------------------------ */
 
 import { GoogleGenAI } from "@google/genai";
+import * as vscode from "vscode";
 import {
+  CancellationToken,
+  CodeAction,
+  CodeActionContext,
+  CodeActionKind,
+  CodeActionProvider,
+  commands,
   Diagnostic,
+  DocumentSelector,
   ExtensionContext,
   languages,
+  Range,
+  TextDocument,
+  TreeDataProvider,
+  TreeItem,
   Uri,
   window,
   workspace,
 } from "vscode";
+
 import { LanguageClient } from "vscode-languageclient";
 
 function LOGHERE(...args) {
@@ -25,6 +38,10 @@ let client: LanguageClient;
 
 let geminiApiKey: string;
 let ai: GoogleGenAI;
+let lastFixContext: string;
+let fixes: CodeAction[];
+let quickfixProvider: DepNodeProvider;
+let quickfixTree: vscode.TreeView<TreeItem>;
 
 export function activate(context: ExtensionContext) {
   // // The server is implemented in node
@@ -90,8 +107,39 @@ export function activate(context: ExtensionContext) {
   // FIXME(rtk0c): don't read env var in prod, here in dev it's easier than changing a json config file in the slave vscode
   geminiApiKey =
     workspace.getConfiguration().get("lahacks2025.geminiApiKey") ||
-    process.env["GEMINI_API"];
+    process.env["GEMINI_KEY"];
   ai = new GoogleGenAI({ apiKey: geminiApiKey });
+
+  const selector: DocumentSelector = "*";
+  context.subscriptions.push(
+    languages.registerCodeActionsProvider(
+      selector,
+      new MyCodeActionProvider(),
+      {
+        providedCodeActionKinds: MyCodeActionProvider.providedCodeActionKinds,
+      }
+    )
+  );
+  quickfixProvider = new DepNodeProvider(() => lastFixContext);
+  // context.subscriptions.push(
+  //   window.registerTreeDataProvider("quickfixSidebarView", quickfixProvider)
+  // );
+  quickfixTree = window.createTreeView("quickfixSidebarView", {
+    treeDataProvider: quickfixProvider,
+  });
+  quickfixTree.message =
+    "Hi there this is a rather long message. Lorem ipsum doloret";
+  console.log("Registered!");
+
+  context.subscriptions.push(
+    commands.registerCommand(
+      "quickfixSidebar.show",
+      (contextArg: { uri: string }) => {
+        lastFixContext = contextArg.uri;
+        LOGHERE("lastFixContext", lastFixContext);
+      }
+    )
+  );
 
   // this fn is called whenever diagnostics change
   // so inside we want to get the list of diagnostics and
@@ -103,31 +151,98 @@ export function activate(context: ExtensionContext) {
   });
 }
 
+export class DepNodeProvider implements TreeDataProvider<TreeItem> {
+  private _onDidChangeTreeData: vscode.EventEmitter<
+    TreeItem | undefined | void
+  > = new vscode.EventEmitter<TreeItem | undefined | void>();
+  //readonly onDidChangeTreeData: vscode.Event<TreeItem | undefined | void> =
+  //  this._onDidChangeTreeData.event;
+  private _thingy;
+
+  constructor(private thingy: () => string | undefined) {
+    this._thingy = thingy;
+  }
+
+  refresh(): void {
+    this._onDidChangeTreeData.fire();
+  }
+
+  getTreeItem(element: TreeItem): vscode.TreeItem {
+    return element;
+  }
+
+  getChildren(element?: TreeItem): Thenable<TreeItem[]> {
+    return Promise.resolve([new MyItem()]);
+  }
+}
+
+export class MyItem extends vscode.TreeItem {
+  constructor() {
+    super("myLabel", vscode.TreeItemCollapsibleState.None);
+
+    this.description = "this is some text";
+  }
+
+  contextValue = "dependency";
+}
+
+class MyCodeActionProvider implements CodeActionProvider {
+  static readonly providedCodeActionKinds = [CodeActionKind.QuickFix];
+
+  provideCodeActions(
+    document: TextDocument,
+    range: Range,
+    context: CodeActionContext,
+    token: CancellationToken
+  ): CodeAction[] {
+    console.log("this was called, and fixes is");
+    console.log(fixes);
+    return fixes;
+  }
+}
+
 async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
+  fixes = [];
   for (const v of diagnostics) {
-    const [uri, diagnostics] = v;
+    const [uri, diags] = v;
     // const coll = languages.createDiagnosticCollection();
-    for (const diagnostic of diagnostics) {
+    for (const diagnostic of diags) {
+      const doc = await workspace.openTextDocument(uri);
+      const contextSrcCode: string = doc.getText();
+      // LOGHERE("thingggggg");
+      // LOGHERE(contextSrcCode);
       // TODO(rtk0c): prompt engineer better
-      const question = `Explain this diagnostic: ${diagnostic.message} (Source: ${diagnostic.source}, Code: ${diagnostic.code})`;
-      const answer = await window.showInformationMessage(question, "Explain");
-      if (answer === "Explain") {
-        try {
-          // Call Gemini API using the ai client
-          const result = await ai.models.generateContent({
-            model: "gemini-2.0-flash",
-            contents: question,
-          });
-          LOGHERE("diagnostic", diagnostic);
-          LOGHERE(result);
-          const explanation = result.candidates[0].content.parts[0].text;
-          window.showInformationMessage(
-            `Explanation for: ${diagnostic.message} - ${explanation}`
-          );
-        } catch (error) {
-          window.showErrorMessage(`Error explaining diagnostic: ${error}`);
-        }
-      }
+      // TODO:
+      // - have the option to explain something as a quick fix
+      // - have an option to refactor it to fix the diagnostic
+
+      // explain something as a quick fix
+      const fix = new CodeAction("Explain", CodeActionKind.QuickFix);
+      fix.diagnostics = [diagnostic];
+      fix.command = {
+        title: "Explain",
+        command: "quickfixSidebar.show",
+        arguments: [{ uri: uri.toString() }],
+      };
+      LOGHERE("made fix", fix);
+      fixes.push(fix);
+      //const question = `Explain this diagnostic: ${diagnostic.message}\n${contextSrcCode}`;
+      //const answer = await window.showInformationMessage(question, "Explain");
+      //if (answer === "Explain") {
+      //  // Call Gemini API using the ai client
+      //  const result = await ai.models.generateContent({
+      //    model: "gemini-2.0-flash",
+      //    contents: question,
+      //  });
+      //  LOGHERE("diagnostic", diagnostic);
+      //  LOGHERE(result);
+      //  const explanation = MarkedString.fromPlainText(
+      //    result.candidates[0].content.parts[0].text
+      //  );
+      //  window.showInformationMessage(
+      //    `Explanation for: ${diagnostic.message} - ${explanation}`
+      //  );
+      //}
     }
   }
 }
