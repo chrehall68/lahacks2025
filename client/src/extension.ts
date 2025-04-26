@@ -8,7 +8,6 @@ import {
   CodeActionProvider,
   commands,
   Diagnostic,
-  DocumentSelector,
   ExtensionContext,
   languages,
   Range,
@@ -309,13 +308,9 @@ export function activate(context: ExtensionContext) {
   ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
   context.subscriptions.push(
-    languages.registerCodeActionsProvider(
-      "*",
-      new MyCodeActionProvider(),
-      {
-        providedCodeActionKinds: MyCodeActionProvider.providedCodeActionKinds,
-      }
-    )
+    languages.registerCodeActionsProvider("*", new MyCodeActionProvider(), {
+      providedCodeActionKinds: MyCodeActionProvider.providedCodeActionKinds,
+    })
   );
   quickfixProvider = new DiagnosticAggregatorViewProvider(context.extensionUri);
   context.subscriptions.push(
@@ -340,8 +335,8 @@ export function activate(context: ExtensionContext) {
 
         const explanation = result.candidates[0].content.parts[0].text;
 
-      const htmlExplanation = converter.makeHtml(explanation);
-quickfixProvider.currentWebview.html = `
+        const htmlExplanation = converter.makeHtml(explanation);
+        quickfixProvider.currentWebview.html = `
   <div>
     <div id="renderedExplanation">${htmlExplanation}</div> 
     <p id="explanationText" style="display: none;">${explanation}</p>
@@ -413,7 +408,7 @@ quickfixProvider.currentWebview.html = `
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) { }
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -427,16 +422,20 @@ class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.command) {
-        case 'addChanges':
+        case "addChanges":
           {
             if (!lastFixContext) {
-              vscode.window.showErrorMessage('No file context available for applying changes.');
+              vscode.window.showErrorMessage(
+                "No file context available for applying changes."
+              );
               return;
             }
-    
-            const document = await vscode.workspace.openTextDocument(vscode.Uri.parse(lastFixContext));
+
+            const document = await vscode.workspace.openTextDocument(
+              vscode.Uri.parse(lastFixContext)
+            );
             const text = document.getText(); // <-- entire file contents
-    
+
             const prompt = `
 You are an expert developer.
 Given the following code and the provided recommendation, modify the code to address the recommendation with minimal changes.
@@ -450,14 +449,14 @@ ${message.explanation}
 
 Please return ONLY the pure revised code WITHOUT any \`\`\` markers, markdown, or explanations.
 `;
-    
+
             const result = await ai.models.generateContent({
               model: "gemini-2.0-flash",
               contents: prompt,
             });
-    
+
             const revisedCode = result.candidates[0].content.parts[0].text;
-    
+
             const edit = new vscode.WorkspaceEdit();
             const fullRange = new vscode.Range(
               document.positionAt(0),
@@ -465,9 +464,11 @@ Please return ONLY the pure revised code WITHOUT any \`\`\` markers, markdown, o
             );
             edit.replace(document.uri, fullRange, revisedCode);
             await vscode.workspace.applyEdit(edit);
-    
+
             await document.save(); // save automatically
-            vscode.window.showInformationMessage('File successfully updated with AI suggestions!');
+            vscode.window.showInformationMessage(
+              "File successfully updated with AI suggestions!"
+            );
           }
           break;
       }
@@ -527,9 +528,9 @@ class MyCodeActionProvider implements CodeActionProvider {
     context: CodeActionContext,
     token: CancellationToken
   ): CodeAction[] {
-    console.log("this was called, and fixes is");
-    console.log(fixes);
-    return fixes;
+    return fixes.filter(
+      (fix) => fix.command.arguments[0].uri === document.uri.toString()
+    );
   }
 }
 
@@ -553,7 +554,6 @@ async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
         command: "quickfixSidebar.show",
         arguments: [{ uri: uri.toString(), diagnostic: diagnostic }],
       };
-      LOGHERE("made fix", fix);
       fixes.push(fix);
     }
   }
