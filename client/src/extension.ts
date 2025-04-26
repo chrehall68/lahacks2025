@@ -18,94 +18,297 @@ import {
   workspace,
 } from "vscode";
 
+import * as path from "path";
 import * as showdown from "showdown";
-import { LanguageClient } from "vscode-languageclient";
-const converter = new showdown.Converter();
+import {
+  LanguageClient,
+  LanguageClientOptions,
+  ServerOptions,
+  TransportKind,
+} from "vscode-languageclient";
 
 function LOGHERE(...args) {
-  console.log("[LAHACKS2025]", ...args);
+  console.log("[LAHACKS]", ...args);
 }
 
-let client: LanguageClient;
-
-// Globals
-// const htmlLanguageService = getLanguageService();
-
-let geminiApiKey: string;
-let ai: GoogleGenAI;
+// ==============================
+//  Globals
+// ==============================
+const documentAttachments = new Map<Uri, TextDocumentAttachments>();
+const virtualDocumentContents = new Map<string, string>();
+const documentToVirtual = new Map<string, string[]>();
+let theClient: LanguageClient;
+const converter = new showdown.Converter();
 let lastFixContext: string;
 let fixes: CodeAction[];
+let ai: GoogleGenAI;
 let quickfixProvider: DiagnosticAggregatorViewProvider;
 let AIPoweredDiagnostics: vscode.DiagnosticCollection;
 
+// ==============================
+//  Language server code
+// ==============================
+interface TextDocumentAttachments {
+  injections?: Region[];
+  lang2vdoc?: Record<string, Uri>;
+}
+
+function canonUri(uri: Uri): string {
+  const preStrip = uri.path.slice(1);
+  const postStrip = preStrip.slice(0, preStrip.lastIndexOf("."));
+  return decodeURIComponent(postStrip);
+}
+
+function withExtensionUri(uri: Uri): string {
+  const preStrip = uri.path.slice(1);
+  return decodeURIComponent(preStrip);
+}
+
+interface Region {
+  language: string;
+  start: number;
+  end: number;
+}
+
+function filterDocContent(doc: string, regions: Iterable<Region>): string {
+  let content = doc.replace(/[^\n]/g, " ");
+  for (const r of regions) {
+    content =
+      content.slice(0, r.start) +
+      doc.slice(r.start, r.end) +
+      content.slice(r.end);
+  }
+  return content;
+}
+
+function parseInjections(doc: string): Region[] {
+  const rx = /@LANGUAGE:([^@]*)@/g;
+  let match: RegExpExecArray;
+  const regions: Region[] = [];
+  while ((match = rx.exec(doc)) !== null) {
+    const sbegRx = /R"""\(/g;
+    sbegRx.lastIndex = match.index;
+    const sbeg = sbegRx.exec(doc);
+    if (!sbeg) {
+      return regions;
+    }
+
+    const sendRx = /\)"""/g;
+    sendRx.lastIndex = sbeg.index;
+    const send = sendRx.exec(doc);
+    if (!send) {
+      return regions;
+    }
+
+    regions.push({
+      language: match[1],
+      start: sbeg.index + sbeg[0].length,
+      end: send.index,
+    });
+    // Look for injection annotation after this snippet
+    rx.lastIndex = send.index;
+  }
+  return regions;
+}
+
+function getAttachments(
+  uri: Uri,
+  doc: string,
+  recompute: boolean
+): TextDocumentAttachments {
+  let res = documentAttachments.get(uri);
+  if (res && !recompute) {
+    return res;
+  }
+  res = {};
+  documentAttachments.set(uri, res);
+  res.injections = parseInjections(doc);
+  return res;
+}
+
+function getInjectionAtPosition(
+  regions: Region[],
+  offset: number
+): Region | null {
+  for (const region of regions) {
+    if (region.start <= offset) {
+      if (offset <= region.end) {
+        return region;
+      }
+    } else {
+      break;
+    }
+  }
+  return null;
+}
+
+// ==============================
+// Extension code
+// ==============================
 export function activate(context: ExtensionContext) {
-  // // The server is implemented in node
-  // const serverModule = context.asAbsolutePath(path.join('server', 'out', 'server.js'));
+  testParseInjections();
 
-  // // If the extension is launched in debug mode then the debug server options are used
-  // // Otherwise the run options are used
-  // const serverOptions: ServerOptions = {
-  // 	run: { module: serverModule, transport: TransportKind.ipc },
-  // 	debug: {
-  // 		module: serverModule,
-  // 		transport: TransportKind.ipc,
-  // 	}
-  // };
+  // ========== Language server ==========
+  // If the extension is launched in debug mode then the debug server options are used
+  // Otherwise the run options are used
+  const serverModule = context.asAbsolutePath(
+    path.join("server", "out", "server.js")
+  );
 
-  // const virtualDocumentContents = new Map<string, string>();
+  // If the extension is launched in debug mode then the debug server options are used
+  // Otherwise the run options are used
+  const serverOptions: ServerOptions = {
+    run: { module: serverModule, transport: TransportKind.ipc },
+    debug: {
+      module: serverModule,
+      transport: TransportKind.ipc,
+    },
+  };
+  workspace.registerTextDocumentContentProvider("embedded-content", {
+    provideTextDocumentContent: (uri) => {
+      return virtualDocumentContents.get(withExtensionUri(uri));
+    },
+  });
 
-  // workspace.registerTextDocumentContentProvider('embedded-content', {
-  // 	provideTextDocumentContent: uri => {
-  // 		const originalUri = uri.path.slice(1).slice(0, -4);
-  // 		const decodedUri = decodeURIComponent(originalUri);
-  // 		return virtualDocumentContents.get(decodedUri);
-  // 	}
-  // });
+  workspace.onDidOpenTextDocument((document) => {
+    LOGHERE("opened document");
+    const doc = document.getText();
+    const att = getAttachments(document.uri, doc, true);
 
-  // const clientOptions: LanguageClientOptions = {
-  // 	documentSelector: [{ scheme: 'file', language: 'html1' }],
-  // 	middleware: {
-  // 		provideCompletionItem: async (document, position, context, token, next) => {
-  // 			// If not in `<style>`, do not perform request forwarding
-  // 			if (!isInsideStyleRegion(htmlLanguageService, document.getText(), document.offsetAt(position))) {
-  // 				return await next(document, position, context, token);
-  // 			}
+    att.lang2vdoc = {};
+    const originalUri = encodeURIComponent(document.uri.toString(true));
+    for (const injection of att.injections) {
+      const vdocUriString = `embedded-content://${injection.language}/${originalUri}.${injection.language}`;
+      const vdocUri = Uri.parse(vdocUriString);
+      att.lang2vdoc[injection.language] = vdocUri;
+    }
 
-  // 			const originalUri = document.uri.toString(true);
-  // 			virtualDocumentContents.set(originalUri, getCSSVirtualContent(htmlLanguageService, document.getText()));
+    // clear out anything existing
+    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
+      []) {
+      virtualDocumentContents.delete(prevVirtual);
+    }
+    // then set new ones
+    documentToVirtual.set(document.uri.toString(), []);
+    console.log(canonUri(Object.values(att.lang2vdoc)[0]));
+    for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
+      virtualDocumentContents.set(
+        withExtensionUri(vdocUri),
+        filterDocContent(
+          doc,
+          att.injections.filter((x) => x.language === language)
+        )
+      );
+      documentToVirtual
+        .get(document.uri.toString())
+        ?.push(withExtensionUri(vdocUri));
+    }
+  });
+  workspace.onDidChangeTextDocument((e) => {
+    const document = e.document;
+    const doc = document.getText();
+    const att = getAttachments(document.uri, doc, true);
 
-  // 			const vdocUriString = `embedded-content://css/${encodeURIComponent(
-  // 				originalUri
-  // 			)}.css`;
-  // 			const vdocUri = Uri.parse(vdocUriString);
-  // 			return await commands.executeCommand<CompletionList>(
-  // 				'vscode.executeCompletionItemProvider',
-  // 				vdocUri,
-  // 				position,
-  // 				context.triggerCharacter
-  // 			);
-  // 		}
-  // 	}
-  // };
+    att.lang2vdoc = {};
+    const originalUri = encodeURIComponent(document.uri.toString(true));
+    for (const injection of att.injections) {
+      const vdocUriString = `embedded-content://${injection.language}/${originalUri}.${injection.language}`;
+      const vdocUri = Uri.parse(vdocUriString);
+      att.lang2vdoc[injection.language] = vdocUri;
+    }
 
-  // // Create the language client and start the client.
-  // client = new LanguageClient(
-  // 	'languageServerExample',
-  // 	'Language Server Example',
-  // 	serverOptions,
-  // 	clientOptions
-  // );
+    // clear out anything existing
+    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
+      []) {
+      virtualDocumentContents.delete(prevVirtual);
+    }
+    // then set new ones
+    documentToVirtual.set(document.uri.toString(), []);
+    for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
+      virtualDocumentContents.set(
+        withExtensionUri(vdocUri),
+        filterDocContent(
+          doc,
+          att.injections.filter((x) => x.language === language)
+        )
+      );
+      documentToVirtual
+        .get(document.uri.toString())
+        ?.push(withExtensionUri(vdocUri));
+    }
+    // TODO(rtk0c): optimized incremental reparse
+    // for (const ch of e.contentChanges) {
+    //   const st = e.document.offsetAt(ch.range.start);
+    //   const ed = e.document.offsetAt(ch.range.end);
+    // }
+  });
 
-  // // Start the client. This will also launch the server
-  // client.start();
+  workspace.onDidCloseTextDocument((e) => {
+    documentAttachments.delete(e.uri);
+    for (const vdocUri of documentToVirtual.get(e.uri.toString())) {
+      virtualDocumentContents.delete(vdocUri);
+    }
+    documentToVirtual.delete(e.uri.toString());
+  });
+  const selector: DocumentSelector = "*";
+  const clientOptions: LanguageClientOptions = {
+    documentSelector: selector,
+    middleware: {
+      provideCompletionItem: async (
+        document,
+        position,
+        context,
+        token,
+        next
+      ) => {
+        const doc = document.getText();
 
+        const attachments = getAttachments(document.uri, doc, false);
+        const injection = getInjectionAtPosition(
+          attachments.injections,
+          document.offsetAt(position)
+        );
+
+        // If not in an injection fragment, forward the request to primary LS directly
+        if (!injection) {
+          return await next(document, position, context, token);
+        }
+
+        // const d = await workspace.openTextDocument(
+        //   attachments.lang2v c[injection.language]
+        // );
+        // await window.showTextDocument(d, { preview: false });
+
+        // Otherwise, forward to minion LS
+        const res = await commands.executeCommand<vscode.CompletionList>(
+          "vscode.executeCompletionItemProvider",
+          attachments.lang2vdoc[injection.language],
+          position,
+          context.triggerCharacter
+        );
+        return res;
+      },
+    },
+  };
+
+  // Create the language client and start the client.
+  theClient = new LanguageClient(
+    "lahacksDemo",
+    "C++ (Fancy)",
+    serverOptions,
+    clientOptions
+  );
+
+  // Start the client. This will also launch the server
+  theClient.start();
+
+  // ========== AI Linting ==========
   // FIXME(rtk0c): don't read env var in prod, here in dev it's easier than changing a json config file in the slave vscode
-  geminiApiKey =
+  const geminiApiKey: string =
     workspace.getConfiguration().get("lahacks2025.geminiApiKey") ||
     process.env["GEMINI_KEY"];
   ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
-  const selector: DocumentSelector = "*";
   context.subscriptions.push(
     languages.registerCodeActionsProvider(
       selector,
@@ -121,26 +324,26 @@ export function activate(context: ExtensionContext) {
   );
 
   // callback for the command
-context.subscriptions.push(
-  commands.registerCommand(
-    "quickfixSidebar.show",
-    async (contextArg: { uri: string; diagnostic: vscode.Diagnostic }) => {
-      lastFixContext = contextArg.uri;
-      LOGHERE("lastFixContext", lastFixContext, contextArg.diagnostic);
+  context.subscriptions.push(
+    commands.registerCommand(
+      "quickfixSidebar.show",
+      async (contextArg: { uri: string; diagnostic: vscode.Diagnostic }) => {
+        lastFixContext = contextArg.uri;
+        LOGHERE("lastFixContext", lastFixContext, contextArg.diagnostic);
 
-      // Call Gemini API using the ai client
-      const result = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents:
-          "Explain this diagnostic. Keep your response to roughly 1 paragraph. Diagnostic: " +
-          contextArg.diagnostic.message,
-      });
+        // Call Gemini API using the ai client
+        const result = await ai.models.generateContent({
+          model: "gemini-2.0-flash",
+          contents:
+            "Explain this diagnostic. Keep your response to roughly 1 paragraph. Diagnostic: " +
+            contextArg.diagnostic.message,
+        });
 
-      const explanation = result.candidates[0].content.parts[0].text;
+        const explanation = result.candidates[0].content.parts[0].text;
 
-      // Set the content of the view FIRST
-      const html = converter.makeHtml(explanation);
-      quickfixProvider.currentWebview.html = `
+        // Set the content of the view FIRST
+        const html = converter.makeHtml(explanation);
+        quickfixProvider.currentWebview.html = `
         <div>
           <p>${html}</p>
           <div id="buttonContainer"></div>
@@ -175,23 +378,25 @@ context.subscriptions.push(
         </div>
       `;
 
-      // Open the view
-      await vscode.commands.executeCommand(
-        "workbench.view.extension.quickfixSidebar"
-      );
+        // Open the view
+        await vscode.commands.executeCommand(
+          "workbench.view.extension.quickfixSidebar"
+        );
 
-      // THEN post the message to show the button
-      quickfixProvider.currentWebview?.postMessage({ command: 'showAddChangesButton' });
-    }
-  )
-);
+        // THEN post the message to show the button
+        quickfixProvider.currentWebview?.postMessage({
+          command: "showAddChangesButton",
+        });
+      }
+    )
+  );
 
   // this fn is called whenever diagnostics change
   // so inside we want to get the list of diagnostics and
   // get an explanation for why each of them occurred
   // we should probably do thi as send a message to
   // gemini to explain the diagnostics
-  languages.onDidChangeDiagnostics((e) => {
+  languages.onDidChangeDiagnostics((_) => {
     explainDiag(languages.getDiagnostics());
   });
 
@@ -217,10 +422,10 @@ class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
-    webviewView.webview.onDidReceiveMessage(message => {
+    webviewView.webview.onDidReceiveMessage((message) => {
       switch (message.command) {
-        case 'addChanges':
-          vscode.window.showInformationMessage('Add Changes button clicked!');
+        case "addChanges":
+          vscode.window.showInformationMessage("Add Changes button clicked!");
           // TODO: implement actual logic for "Add Changes" here
           break;
       }
@@ -294,8 +499,6 @@ async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
     for (const diagnostic of diags) {
       const doc = await workspace.openTextDocument(uri);
       const contextSrcCode: string = doc.getText();
-      // LOGHERE("thingggggg");
-      // LOGHERE(contextSrcCode);
       // TODO:
       // - have the option to explain something as a quick fix - DONE
       // - have an option to refactor it to fix the diagnostic - TODO later
@@ -376,15 +579,26 @@ ${processedText}
             lineStart: { type: Type.NUMBER },
             lineEnd: { type: Type.NUMBER },
           },
-          required: ["toHighlight", "message", "severity", "lineStart", "lineEnd"],
+          required: [
+            "toHighlight",
+            "message",
+            "severity",
+            "lineStart",
+            "lineEnd",
+          ],
         },
       },
     },
   });
   const diagnosticsText = response.text;
   console.log("diagnosticsText", diagnosticsText);
-  const preDiagnostics: { toHighlight: string; message: string; severity: number, lineStart: number, lineEnd: number }[] =
-    JSON.parse(diagnosticsText);
+  const preDiagnostics: {
+    toHighlight: string;
+    message: string;
+    severity: number;
+    lineStart: number;
+    lineEnd: number;
+  }[] = JSON.parse(diagnosticsText);
 
   const diagnostics = createDiagnostics(doc, preDiagnostics);
   console.log("diagnostics", diagnostics);
@@ -393,40 +607,54 @@ ${processedText}
 }
 
 export async function deactivate(): Promise<void> {
-  // if (!client) {
-  // 	return undefined;
-  // }
-  // return client.stop();
-  return undefined;
+  if (!theClient) {
+    console.log("No client to stop");
+    return undefined;
+  }
+  return theClient.stop();
 }
 
+function testParseInjections() {
+  const i = '// @LANGUAGE: sql@\nauto s = R"""(some code here)"""';
+  const pp = parseInjections(i);
+  const sec = i.substring(pp[0].start, pp[0].end);
+  return sec;
+}
 const SEVERITIES = {
   1: vscode.DiagnosticSeverity.Error,
   2: vscode.DiagnosticSeverity.Warning,
   3: vscode.DiagnosticSeverity.Information,
   4: vscode.DiagnosticSeverity.Hint,
-}
+};
 
-function createDiagnostics(document: vscode.TextDocument, preDiagnostics): vscode.Diagnostic[] {
+function createDiagnostics(
+  document: vscode.TextDocument,
+  preDiagnostics
+): vscode.Diagnostic[] {
   const diagnostics: vscode.Diagnostic[] = [];
 
   for (const d of preDiagnostics) {
-    
     const startPosition = new vscode.Position(d.lineStart, 0);
     const endLine = Math.min(d.lineEnd, document.lineCount - 1);
     const endPosition = document.lineAt(endLine).range.end;
 
-    const scopedText = document.getText(new vscode.Range(startPosition, endPosition));
+    const scopedText = document.getText(
+      new vscode.Range(startPosition, endPosition)
+    );
 
     // regex search inside the scoped text
-    const regex = new RegExp(d.toHighlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'); // escape regex
+    const regex = new RegExp(
+      d.toHighlight.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      "g"
+    ); // escape regex
     const match = regex.exec(scopedText);
 
     if (match && match.index !== undefined) {
       const startOffset = match.index;
       const endOffset = startOffset + match[0].length;
 
-      const absoluteStartOffset = document.offsetAt(startPosition) + startOffset;
+      const absoluteStartOffset =
+        document.offsetAt(startPosition) + startOffset;
       const absoluteEndOffset = document.offsetAt(startPosition) + endOffset;
 
       const absoluteStartPos = document.positionAt(absoluteStartOffset);
@@ -434,13 +662,13 @@ function createDiagnostics(document: vscode.TextDocument, preDiagnostics): vscod
 
       const range = new vscode.Range(absoluteStartPos, absoluteEndPos);
 
-      diagnostics.push(new vscode.Diagnostic(
-        range,
-        d.message,
-        SEVERITIES[d.severity]
-      ));
+      diagnostics.push(
+        new vscode.Diagnostic(range, d.message, SEVERITIES[d.severity])
+      );
     } else {
-      console.warn(`Could not find match for: ${d.toHighlight} between lines ${d.lineStart} and ${d.lineEnd}`);
+      console.warn(
+        `Could not find match for: ${d.toHighlight} between lines ${d.lineStart} and ${d.lineEnd}`
+      );
     }
   }
 
@@ -448,7 +676,7 @@ function createDiagnostics(document: vscode.TextDocument, preDiagnostics): vscod
 }
 
 function positionAt(text: string, offset: number): vscode.Position {
-  const lines = text.slice(0, offset).split('\n');
+  const lines = text.slice(0, offset).split("\n");
   const line = lines.length - 1;
   const character = lines[lines.length - 1].length;
   return new vscode.Position(line, character);
