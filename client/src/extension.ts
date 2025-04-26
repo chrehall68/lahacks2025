@@ -257,14 +257,16 @@ async function makeAIPoweredDiagnostics(doc: TextDocument): Promise<void> {
   would know about and a normal language server wouldn't). 
   The diagnostics should be of the format:
 
-type error_string: string where error occurs
-
 type Diagnostic {
   toHighlight: error_string,
   message: string,
+  severity: severity_number
   lineStart: number,
   lineEnd: number,
 }
+
+where error_string = string where error occurs
+and severity_number = number from 1 to 4, inclusive, with 1 being heighest severity and 4 being lowest
 
 Please note that the error_string will be regex matched exactly,
 so the error string in diagnostic must exactly match the string
@@ -281,6 +283,7 @@ ${processedText}
     model: "gemini-2.0-flash",
     contents: prompt,
     config: {
+      temperature: 0,
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.ARRAY,
@@ -289,17 +292,18 @@ ${processedText}
           properties: {
             toHighlight: { type: Type.STRING },
             message: { type: Type.STRING },
+            severity: { type: Type.NUMBER },
             lineStart: { type: Type.NUMBER },
             lineEnd: { type: Type.NUMBER },
           },
-          required: ["toHighlight", "message", "lineStart", "lineEnd"],
+          required: ["toHighlight", "message", "severity", "lineStart", "lineEnd"],
         },
       },
     },
   });
   const diagnosticsText = response.text;
   console.log("diagnosticsText", diagnosticsText);
-  const preDiagnostics: { toHighlight: string; message: string; lineStart: number, lineEnd: number }[] =
+  const preDiagnostics: { toHighlight: string; message: string; severity: number, lineStart: number, lineEnd: number }[] =
     JSON.parse(diagnosticsText);
 
   const diagnostics = createDiagnostics(doc, preDiagnostics);
@@ -314,6 +318,13 @@ export async function deactivate(): Promise<void> {
   // }
   // return client.stop();
   return undefined;
+}
+
+const SEVERITIES = {
+  1: vscode.DiagnosticSeverity.Error,
+  2: vscode.DiagnosticSeverity.Warning,
+  3: vscode.DiagnosticSeverity.Information,
+  4: vscode.DiagnosticSeverity.Hint,
 }
 
 function createDiagnostics(document: vscode.TextDocument, preDiagnostics): vscode.Diagnostic[] {
@@ -346,7 +357,7 @@ function createDiagnostics(document: vscode.TextDocument, preDiagnostics): vscod
       diagnostics.push(new vscode.Diagnostic(
         range,
         d.message,
-        vscode.DiagnosticSeverity.Warning
+        SEVERITIES[d.severity]
       ));
     } else {
       console.warn(`Could not find match for: ${d.toHighlight} between lines ${d.lineStart} and ${d.lineEnd}`);
