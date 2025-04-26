@@ -330,23 +330,63 @@ export function activate(context: ExtensionContext) {
       async (contextArg: { uri: string; diagnostic: vscode.Diagnostic }) => {
         lastFixContext = contextArg.uri;
         LOGHERE("lastFixContext", lastFixContext, contextArg.diagnostic);
+
         // Call Gemini API using the ai client
-        // TODO(rtk0c): prompt engineer better
         const result = await ai.models.generateContent({
           model: "gemini-2.0-flash",
           contents:
             "Explain this diagnostic. Keep your response to roughly 1 paragraph. Diagnostic: " +
             contextArg.diagnostic.message,
         });
+
         const explanation = result.candidates[0].content.parts[0].text;
 
-        // Set the content of the view
+        // Set the content of the view FIRST
         const html = converter.makeHtml(explanation);
-        quickfixProvider.currentWebview.html = `<p>${html}</p>`;
+        quickfixProvider.currentWebview.html = `
+        <div>
+          <p>${html}</p>
+          <div id="buttonContainer"></div>
+
+          <script>
+            const vscode = acquireVsCodeApi();
+            window.addEventListener('message', event => {
+              const message = event.data;
+              switch (message.command) {
+                case 'showAddChangesButton':
+                  createAddChangesButton();
+                  break;
+                case 'hideAddChangesButton':
+                  clearAddChangesButton();
+                  break;
+              }
+            });
+
+            function createAddChangesButton() {
+              const container = document.getElementById('buttonContainer');
+              container.innerHTML = '<button id="addChangesButton">Add Changes</button>';
+              document.getElementById('addChangesButton').addEventListener('click', () => {
+                vscode.postMessage({ command: 'addChanges' });
+              });
+            }
+
+            function clearAddChangesButton() {
+              const container = document.getElementById('buttonContainer');
+              container.innerHTML = '';
+            }
+          </script>
+        </div>
+      `;
+
         // Open the view
         await vscode.commands.executeCommand(
           "workbench.view.extension.quickfixSidebar"
         );
+
+        // THEN post the message to show the button
+        quickfixProvider.currentWebview?.postMessage({
+          command: "showAddChangesButton",
+        });
       }
     )
   );
@@ -382,13 +422,55 @@ class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
-
+    webviewView.webview.onDidReceiveMessage((message) => {
+      switch (message.command) {
+        case "addChanges":
+          vscode.window.showInformationMessage("Add Changes button clicked!");
+          // TODO: implement actual logic for "Add Changes" here
+          break;
+      }
+    });
     // Save reference for updating later
     this.currentWebview = webviewView.webview;
   }
 
   getHtmlForWebview(webview: vscode.Webview): string {
-    return "<div>Press The QuickFix Explain item to see the explanation for a diagnostic here</div>";
+    return `
+      <div>
+        <p>Press The QuickFix Explain item to see the explanation for a diagnostic here</p>
+        <div id="buttonContainer"></div>
+      </div>
+
+      <script>
+        const vscode = acquireVsCodeApi();
+
+        window.addEventListener('message', event => {
+          const message = event.data;
+          switch (message.command) {
+            case 'showAddChangesButton':
+              createAddChangesButton();
+              break;
+            case 'hideAddChangesButton':
+              clearAddChangesButton();
+              break;
+          }
+        });
+
+        function createAddChangesButton() {
+          const container = document.getElementById('buttonContainer');
+          container.innerHTML = '<button id="addChangesButton">Add Changes</button>';
+
+          document.getElementById('addChangesButton').addEventListener('click', () => {
+            vscode.postMessage({ command: 'addChanges' });
+          });
+        }
+
+        function clearAddChangesButton() {
+          const container = document.getElementById('buttonContainer');
+          container.innerHTML = '';
+        }
+      </script>
+    `;
   }
 
   public currentWebview?: vscode.Webview;
@@ -458,14 +540,16 @@ async function makeAIPoweredDiagnostics(doc: TextDocument): Promise<void> {
   would know about and a normal language server wouldn't). 
   The diagnostics should be of the format:
 
-type error_string: string where error occurs
-
 type Diagnostic {
   toHighlight: error_string,
   message: string,
+  severity: severity_number
   lineStart: number,
   lineEnd: number,
 }
+
+where error_string = string where error occurs
+and severity_number = number from 1 to 4, inclusive, with 1 being heighest severity and 4 being lowest
 
 Please note that the error_string will be regex matched exactly,
 so the error string in diagnostic must exactly match the string
@@ -482,6 +566,7 @@ ${processedText}
     model: "gemini-2.0-flash",
     contents: prompt,
     config: {
+      temperature: 0,
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.ARRAY,
@@ -490,10 +575,17 @@ ${processedText}
           properties: {
             toHighlight: { type: Type.STRING },
             message: { type: Type.STRING },
+            severity: { type: Type.NUMBER },
             lineStart: { type: Type.NUMBER },
             lineEnd: { type: Type.NUMBER },
           },
-          required: ["toHighlight", "message", "lineStart", "lineEnd"],
+          required: [
+            "toHighlight",
+            "message",
+            "severity",
+            "lineStart",
+            "lineEnd",
+          ],
         },
       },
     },
@@ -503,6 +595,7 @@ ${processedText}
   const preDiagnostics: {
     toHighlight: string;
     message: string;
+    severity: number;
     lineStart: number;
     lineEnd: number;
   }[] = JSON.parse(diagnosticsText);
@@ -515,6 +608,7 @@ ${processedText}
 
 export async function deactivate(): Promise<void> {
   if (!theClient) {
+    console.log("No client to stop");
     return undefined;
   }
   return theClient.stop();
@@ -526,6 +620,12 @@ function testParseInjections() {
   const sec = i.substring(pp[0].start, pp[0].end);
   return sec;
 }
+const SEVERITIES = {
+  1: vscode.DiagnosticSeverity.Error,
+  2: vscode.DiagnosticSeverity.Warning,
+  3: vscode.DiagnosticSeverity.Information,
+  4: vscode.DiagnosticSeverity.Hint,
+};
 
 function createDiagnostics(
   document: vscode.TextDocument,
@@ -563,11 +663,7 @@ function createDiagnostics(
       const range = new vscode.Range(absoluteStartPos, absoluteEndPos);
 
       diagnostics.push(
-        new vscode.Diagnostic(
-          range,
-          d.message,
-          vscode.DiagnosticSeverity.Warning
-        )
+        new vscode.Diagnostic(range, d.message, SEVERITIES[d.severity])
       );
     } else {
       console.warn(
