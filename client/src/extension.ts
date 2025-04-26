@@ -351,6 +351,14 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
   }
 }
 
+function charsBetween(a: string, b: string): string[] {
+  const res = [];
+  for (let n = a.charCodeAt(0); n <= b.charCodeAt(0); ++n) {
+    res.push(String.fromCharCode(n));
+  }
+  return res;
+}
+
 // ==============================
 // Extension code
 // ==============================
@@ -477,6 +485,14 @@ export function activate(context: ExtensionContext) {
     documentToVirtual.delete(e.uri.toString());
   });
   
+  // TODO(rtk0c): this is a pretty good default for most languages, but e.g. haskell or lisp won't like this
+  const triggerCharacters = charsBetween('a', 'z')
+    .concat(charsBetween('A', 'Z'))
+    .concat(["."]);
+  context.subscriptions.push(
+    languages.registerCompletionItemProvider("*", new InjectionCodeCompleteProvider(), ...triggerCharacters)
+  );
+
   context.subscriptions.push(
     languages.registerCodeLensProvider("*", new InjectionCodeLensProvider())
   );
