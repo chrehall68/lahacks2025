@@ -6,6 +6,8 @@ import {
   CodeActionContext,
   CodeActionKind,
   CodeActionProvider,
+  CodeLens,
+  CodeLensProvider,
   commands,
   Diagnostic,
   ExtensionContext,
@@ -101,6 +103,7 @@ const fragdelimsFor: Record<LangId, FragmentDelims> = {
   'typescript': { sbeg: /`/g, send: /`/g },
 }
 
+// TODO support only parse for begin delimiter on the next line, to prevent misuses
 function parseInjections(doc: string, rx: FragmentDelims): Region[] {
   const rxInjectionTag = /@LANGUAGE:([^@]*)@/g;
   let match: RegExpExecArray;
@@ -177,6 +180,25 @@ function getInjectionAtPosition(
   return null;
 }
 
+class InjectionCodeLensProvider implements CodeLensProvider {
+  onDidChangeCodeLenses?: vscode.Event<void>;
+
+  provideCodeLenses(document: TextDocument, token: CancellationToken): vscode.ProviderResult<vscode.CodeLens[]> {
+    const att = getAttachments(document.uri);
+    const codeLenses = [];
+    for (const injection of att.injections) {
+      const range = new Range(document.positionAt(injection.start), document.positionAt(injection.end));
+      codeLenses.push(new CodeLens(range, {
+        title: "New Tab",
+        tooltip: "Open injected fragment in a new buffer",
+        command: "lahacks2025.openFragment",
+        arguments: [att.lang2vdoc[injection.langFileExt]],
+      }));
+    }
+    return codeLenses;
+  }
+}
+
 // ==============================
 // Extension code
 // ==============================
@@ -199,11 +221,15 @@ export function activate(context: ExtensionContext) {
       transport: TransportKind.ipc,
     },
   };
-  workspace.registerTextDocumentContentProvider("embedded-content", {
-    provideTextDocumentContent: (uri) => {
+  const contentProvider = new class implements vscode.TextDocumentContentProvider {
+    onDidChangeEmitter = new vscode.EventEmitter<vscode.Uri>();
+    onDidChange = this.onDidChangeEmitter.event;
+
+    provideTextDocumentContent(uri) {
       return virtualDocumentContents.get(withExtensionUri(uri));
-    },
-  });
+    }
+  };
+  workspace.registerTextDocumentContentProvider("embedded-content", contentProvider,);
 
   const refreshDocument = (document: TextDocument) => {
     const doc = document.getText();
@@ -241,6 +267,7 @@ export function activate(context: ExtensionContext) {
       documentToVirtual
         .get(document.uri.toString())
         ?.push(withExtensionUri(vdocUri));
+      contentProvider.onDidChangeEmitter.fire(vdocUri);
     }
   };
   workspace.onDidOpenTextDocument(refreshDocument);
@@ -302,6 +329,19 @@ export function activate(context: ExtensionContext) {
   // Start the client. This will also launch the server
   theClient.start();
 
+  context.subscriptions.push(
+    languages.registerCodeLensProvider("*", new InjectionCodeLensProvider())
+  );
+  context.subscriptions.push(
+    commands.registerCommand(
+      "lahacks2025.openFragment",
+      async (vdocUri) => {
+        const document = await workspace.openTextDocument(vdocUri);
+        await window.showTextDocument(document);
+      },
+    )
+  );
+
   // ========== AI Linting ==========
   // FIXME(rtk0c): don't read env var in prod, here in dev it's easier than changing a json config file in the slave vscode
   const geminiApiKey: string =
@@ -314,6 +354,7 @@ export function activate(context: ExtensionContext) {
       providedCodeActionKinds: MyCodeActionProvider.providedCodeActionKinds,
     })
   );
+
   quickfixProvider = new DiagnosticAggregatorViewProvider(context.extensionUri);
   context.subscriptions.push(
     window.registerWebviewViewProvider("quickfixSidebarView", quickfixProvider)
