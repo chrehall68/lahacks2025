@@ -61,11 +61,11 @@
   ],
   "main": "./client/out/extension",
   "scripts": {
-    "vscode:prepublish": "cd client && pnpm install && cd .. && pnpm run compile",
+    "vscode:prepublish": "cd client && $npm_execpath install && cd .. && $npm_execpath run compile",
     "compile": "tsc -b",
     "watch": "tsc -b -w",
     "lint": "eslint",
-    "postinstall": "cd client && pnpm install"
+    "postinstall": "cd client && $npm_execpath install"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",
