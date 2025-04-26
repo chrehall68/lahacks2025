@@ -381,11 +381,25 @@ export function activate(context: ExtensionContext) {
 
   // also listen for saved files and then come up with
   // ai-powered diagnostics for them
+  // also listen for saved files and then come up with
+  // ai-powered diagnostics for them
   AIPoweredDiagnostics = languages.createDiagnosticCollection("ai-powered");
   context.subscriptions.push(AIPoweredDiagnostics);
+
+  // Listen for saves
   context.subscriptions.push(
     workspace.onDidSaveTextDocument(makeAIPoweredDiagnostics)
   );
+
+  // Listen for file opens
+  context.subscriptions.push(
+    workspace.onDidOpenTextDocument(makeAIPoweredDiagnostics)
+  );
+
+  // Handle documents already open when extension activates
+  for (const document of vscode.workspace.textDocuments) {
+    makeAIPoweredDiagnostics(document);
+}
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
