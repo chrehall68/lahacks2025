@@ -6,6 +6,8 @@ import {
   CodeActionContext,
   CodeActionKind,
   CodeActionProvider,
+  CodeLens,
+  CodeLensProvider,
   commands,
   Diagnostic,
   ExtensionContext,
@@ -101,6 +103,7 @@ const fragdelimsFor: Record<LangId, FragmentDelims> = {
   'typescript': { sbeg: /`/g, send: /`/g },
 }
 
+// TODO support only parse for begin delimiter on the next line, to prevent misuses
 function parseInjections(doc: string, rx: FragmentDelims): Region[] {
   const rxInjectionTag = /@LANGUAGE:([^@]*)@/g;
   let match: RegExpExecArray;
@@ -175,6 +178,25 @@ function getInjectionAtPosition(
     }
   }
   return null;
+}
+
+class InjectionCodeLensProvider implements CodeLensProvider {
+  onDidChangeCodeLenses?: vscode.Event<void>;
+
+  provideCodeLenses(document: TextDocument, token: CancellationToken): vscode.ProviderResult<vscode.CodeLens[]> {
+    const att = getAttachments(document.uri);
+    const codeLenses = [];
+    for (const injection of att.injections) {
+      const range = new Range(document.positionAt(injection.start), document.positionAt(injection.end));
+      codeLenses.push(new CodeLens(range, {
+        title: "New Tab",
+        tooltip: "Open injected fragment in a new buffer",
+        command: "lahacks2025.openFragment",
+        arguments: [att.lang2vdoc[injection.langFileExt]],
+      }));
+    }
+    return codeLenses;
+  }
 }
 
 // ==============================
@@ -302,6 +324,19 @@ export function activate(context: ExtensionContext) {
   // Start the client. This will also launch the server
   theClient.start();
 
+  context.subscriptions.push(
+    languages.registerCodeLensProvider("*", new InjectionCodeLensProvider())
+  );
+  context.subscriptions.push(
+    commands.registerCommand(
+      "lahacks2025.openFragment",
+      async (vdocUri) => {
+        const document = await workspace.openTextDocument(vdocUri);
+        await window.showTextDocument(document);
+      },
+    )
+  );
+
   // ========== AI Linting ==========
   // FIXME(rtk0c): don't read env var in prod, here in dev it's easier than changing a json config file in the slave vscode
   const geminiApiKey: string =
@@ -314,6 +349,7 @@ export function activate(context: ExtensionContext) {
       providedCodeActionKinds: MyCodeActionProvider.providedCodeActionKinds,
     })
   );
+
   quickfixProvider = new DiagnosticAggregatorViewProvider(context.extensionUri);
   context.subscriptions.push(
     window.registerWebviewViewProvider("quickfixSidebarView", quickfixProvider)
@@ -420,7 +456,7 @@ export function activate(context: ExtensionContext) {
   // Handle documents already open when extension activates
   for (const document of vscode.workspace.textDocuments) {
     makeAIPoweredDiagnostics(document);
-}
+  }
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
