@@ -20,15 +20,15 @@
   ],
   "contributes": {
     "configuration": {
-    "title": "LAHACKS2025 Settings",
-    "properties": {
-      "lahacks2025.geminiApiKey": {
-        "type": "string",
-        "default": "",
-        "description": "Gemini API Key for LAHACKS2025 extension."
+      "title": "LAHACKS2025 Settings",
+      "properties": {
+        "lahacks2025.geminiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Gemini API Key for LAHACKS2025 extension."
+        }
       }
-    }
-  },
+    },
     "commands": [
       {
         "command": "quickfixSidebar.show",
@@ -57,7 +57,7 @@
     }
   },
   "activationEvents": [
-    "onLanguage:cpp"
+    "*"
   ],
   "main": "./client/out/extension",
   "scripts": {

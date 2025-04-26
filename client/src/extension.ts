@@ -18,11 +18,13 @@ import {
   workspace,
 } from "vscode";
 
+import * as path from "path";
 import * as showdown from "showdown";
 import {
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
+  TransportKind,
 } from "vscode-languageclient";
 
 function LOGHERE(...args) {
@@ -34,6 +36,7 @@ function LOGHERE(...args) {
 // ==============================
 const documentAttachments = new Map<Uri, TextDocumentAttachments>();
 const virtualDocumentContents = new Map<string, string>();
+const documentToVirtual = new Map<string, string[]>();
 let theClient: LanguageClient;
 const converter = new showdown.Converter();
 let lastFixContext: string;
@@ -54,6 +57,11 @@ function canonUri(uri: Uri): string {
   const preStrip = uri.path.slice(1);
   const postStrip = preStrip.slice(0, preStrip.lastIndexOf("."));
   return decodeURIComponent(postStrip);
+}
+
+function withExtensionUri(uri: Uri): string {
+  const preStrip = uri.path.slice(1);
+  return decodeURIComponent(preStrip);
 }
 
 interface Region {
@@ -143,12 +151,22 @@ export function activate(context: ExtensionContext) {
   // ========== Language server ==========
   // If the extension is launched in debug mode then the debug server options are used
   // Otherwise the run options are used
+  const serverModule = context.asAbsolutePath(
+    path.join("server", "out", "server.js")
+  );
+
+  // If the extension is launched in debug mode then the debug server options are used
+  // Otherwise the run options are used
   const serverOptions: ServerOptions = {
-    command: "clangd",
+    run: { module: serverModule, transport: TransportKind.ipc },
+    debug: {
+      module: serverModule,
+      transport: TransportKind.ipc,
+    },
   };
   workspace.registerTextDocumentContentProvider("embedded-content", {
     provideTextDocumentContent: (uri) => {
-      return virtualDocumentContents.get(canonUri(uri));
+      return virtualDocumentContents.get(withExtensionUri(uri));
     },
   });
 
@@ -164,14 +182,26 @@ export function activate(context: ExtensionContext) {
       const vdocUri = Uri.parse(vdocUriString);
       att.lang2vdoc[injection.language] = vdocUri;
     }
+
+    // clear out anything existing
+    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
+      []) {
+      virtualDocumentContents.delete(prevVirtual);
+    }
+    // then set new ones
+    documentToVirtual.set(document.uri.toString(), []);
+    console.log(canonUri(Object.values(att.lang2vdoc)[0]));
     for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
       virtualDocumentContents.set(
-        canonUri(vdocUri),
+        withExtensionUri(vdocUri),
         filterDocContent(
           doc,
           att.injections.filter((x) => x.language === language)
         )
       );
+      documentToVirtual
+        .get(document.uri.toString())
+        ?.push(withExtensionUri(vdocUri));
     }
   });
   workspace.onDidChangeTextDocument((e) => {
@@ -186,14 +216,25 @@ export function activate(context: ExtensionContext) {
       const vdocUri = Uri.parse(vdocUriString);
       att.lang2vdoc[injection.language] = vdocUri;
     }
+
+    // clear out anything existing
+    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
+      []) {
+      virtualDocumentContents.delete(prevVirtual);
+    }
+    // then set new ones
+    documentToVirtual.set(document.uri.toString(), []);
     for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
       virtualDocumentContents.set(
-        canonUri(vdocUri),
+        withExtensionUri(vdocUri),
         filterDocContent(
           doc,
           att.injections.filter((x) => x.language === language)
         )
       );
+      documentToVirtual
+        .get(document.uri.toString())
+        ?.push(withExtensionUri(vdocUri));
     }
     // TODO(rtk0c): optimized incremental reparse
     // for (const ch of e.contentChanges) {
@@ -204,10 +245,14 @@ export function activate(context: ExtensionContext) {
 
   workspace.onDidCloseTextDocument((e) => {
     documentAttachments.delete(e.uri);
-    virtualDocumentContents.delete(canonUri(e.uri));
+    for (const vdocUri of documentToVirtual.get(e.uri.toString())) {
+      virtualDocumentContents.delete(vdocUri);
+    }
+    documentToVirtual.delete(e.uri.toString());
   });
+  const selector: DocumentSelector = "*";
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "cpp" }],
+    documentSelector: selector,
     middleware: {
       provideCompletionItem: async (
         document,
@@ -229,13 +274,19 @@ export function activate(context: ExtensionContext) {
           return await next(document, position, context, token);
         }
 
+        // const d = await workspace.openTextDocument(
+        //   attachments.lang2v c[injection.language]
+        // );
+        // await window.showTextDocument(d, { preview: false });
+
         // Otherwise, forward to minion LS
-        return await commands.executeCommand<vscode.CompletionList>(
+        const res = await commands.executeCommand<vscode.CompletionList>(
           "vscode.executeCompletionItemProvider",
           attachments.lang2vdoc[injection.language],
           position,
           context.triggerCharacter
         );
+        return res;
       },
     },
   };
@@ -258,7 +309,6 @@ export function activate(context: ExtensionContext) {
     process.env["GEMINI_KEY"];
   ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
-  const selector: DocumentSelector = "*";
   context.subscriptions.push(
     languages.registerCodeActionsProvider(
       selector,
