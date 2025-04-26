@@ -262,9 +262,9 @@ type error_string: string where error occurs
 type Diagnostic {
   toHighlight: error_string,
   message: string,
+  lineStart: number,
+  lineEnd: number,
 }
-
-
 
 Please note that the error_string will be regex matched exactly,
 so the error string in diagnostic must exactly match the string
@@ -289,30 +289,19 @@ ${processedText}
           properties: {
             toHighlight: { type: Type.STRING },
             message: { type: Type.STRING },
+            lineStart: { type: Type.NUMBER },
+            lineEnd: { type: Type.NUMBER },
           },
-          required: ["toHighlight", "message"],
+          required: ["toHighlight", "message", "lineStart", "lineEnd"],
         },
       },
     },
   });
   const diagnosticsText = response.text;
   console.log("diagnosticsText", diagnosticsText);
-  const preDiagnostics: { toHighlight: string; message: string }[] =
+  const preDiagnostics: { toHighlight: string; message: string; lineStart: number, lineEnd: number }[] =
     JSON.parse(diagnosticsText);
 
-  
-  // const diagnostics: Diagnostic[] = preDiagnostics.map((d) => {
-
-  //   return {
-  //     range: new vscode.Range(
-  //       new vscode.Position(0, 1),
-  //       new vscode.Position(0, 1)
-  //     ),
-  //     message: d.message,
-  //     //TODO: ai determines severity.
-  //     severity: vscode.DiagnosticSeverity.Warning,
-  //   };
-  // });
   const diagnostics = createDiagnostics(doc, preDiagnostics);
   console.log("diagnostics", diagnostics);
 
@@ -327,22 +316,32 @@ export async function deactivate(): Promise<void> {
   return undefined;
 }
 
-function createDiagnostics(document: TextDocument, preDiagnostics): vscode.Diagnostic[] {
+function createDiagnostics(document: vscode.TextDocument, preDiagnostics): vscode.Diagnostic[] {
   const diagnostics: vscode.Diagnostic[] = [];
-  const documentText = document.getText();
 
   for (const d of preDiagnostics) {
+    
+    const startPosition = new vscode.Position(d.lineStart, 0);
+    const endLine = Math.min(d.lineEnd, document.lineCount - 1);
+    const endPosition = document.lineAt(endLine).range.end;
+
+    const scopedText = document.getText(new vscode.Range(startPosition, endPosition));
+
+    // regex search inside the scoped text
     const regex = new RegExp(d.toHighlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'); // escape regex
-    const match = regex.exec(documentText);
+    const match = regex.exec(scopedText);
 
     if (match && match.index !== undefined) {
       const startOffset = match.index;
       const endOffset = startOffset + match[0].length;
 
-      const startPosition = positionAt(documentText, startOffset);
-      const endPosition = positionAt(documentText, endOffset);
+      const absoluteStartOffset = document.offsetAt(startPosition) + startOffset;
+      const absoluteEndOffset = document.offsetAt(startPosition) + endOffset;
 
-      const range = new vscode.Range(startPosition, endPosition);
+      const absoluteStartPos = document.positionAt(absoluteStartOffset);
+      const absoluteEndPos = document.positionAt(absoluteEndOffset);
+
+      const range = new vscode.Range(absoluteStartPos, absoluteEndPos);
 
       diagnostics.push(new vscode.Diagnostic(
         range,
@@ -350,7 +349,7 @@ function createDiagnostics(document: TextDocument, preDiagnostics): vscode.Diagn
         vscode.DiagnosticSeverity.Warning
       ));
     } else {
-      console.warn(`Could not find match for: ${d.toHighlight}`);
+      console.warn(`Could not find match for: ${d.toHighlight} between lines ${d.lineStart} and ${d.lineEnd}`);
     }
   }
 
