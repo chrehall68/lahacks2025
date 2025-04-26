@@ -19,22 +19,41 @@ import {
 } from "vscode";
 
 import * as showdown from "showdown";
-import { LanguageClient, ServerOptions } from "vscode-languageclient";
-const converter = new showdown.Converter();
+import {
+  LanguageClient,
+  LanguageClientOptions,
+  ServerOptions,
+} from "vscode-languageclient";
 
+function LOGHERE(...args) {
+  console.log("[LAHACKS]", ...args);
+}
+
+// ==============================
+//  Globals
+// ==============================
+const documentAttachments = new Map<Uri, TextDocumentAttachments>();
+const virtualDocumentContents = new Map<string, string>();
+let theClient: LanguageClient;
+const converter = new showdown.Converter();
+let lastFixContext: string;
+let fixes: CodeAction[];
+let ai: GoogleGenAI;
+let quickfixProvider: DiagnosticAggregatorViewProvider;
+let AIPoweredDiagnostics: vscode.DiagnosticCollection;
+
+// ==============================
+//  Language server code
+// ==============================
 interface TextDocumentAttachments {
   injections?: Region[];
   lang2vdoc?: Record<string, Uri>;
 }
 
-const documentAttachments = new Map<Uri, TextDocumentAttachments>();
-const virtualDocumentContents = new Map<string, string>();
-
-let theClient: LanguageClient;
-
 function canonUri(uri: Uri): string {
-  const originalUri = uri.path.slice(1).slice(0, -4);
-  return decodeURIComponent(originalUri);
+  const preStrip = uri.path.slice(1);
+  const postStrip = preStrip.slice(0, preStrip.lastIndexOf("."));
+  return decodeURIComponent(postStrip);
 }
 
 interface Region {
@@ -84,9 +103,13 @@ function parseInjections(doc: string): Region[] {
   return regions;
 }
 
-function getAttachments(uri: Uri, doc: string): TextDocumentAttachments {
+function getAttachments(
+  uri: Uri,
+  doc: string,
+  recompute: boolean
+): TextDocumentAttachments {
   let res = documentAttachments.get(uri);
-  if (res) {
+  if (res && !recompute) {
     return res;
   }
   res = {};
@@ -110,69 +133,127 @@ function getInjectionAtPosition(
   }
   return null;
 }
-let lastFixContext: string;
-let fixes: CodeAction[];
-let quickfixProvider: DiagnosticAggregatorViewProvider;
-let AIPoweredDiagnostics: vscode.DiagnosticCollection;
 
+// ==============================
+// Extension code
+// ==============================
 export function activate(context: ExtensionContext) {
   testParseInjections();
 
+  // ========== Language server ==========
   // If the extension is launched in debug mode then the debug server options are used
   // Otherwise the run options are used
   const serverOptions: ServerOptions = {
     command: "clangd",
   };
+  workspace.registerTextDocumentContentProvider("embedded-content", {
+    provideTextDocumentContent: (uri) => {
+      return virtualDocumentContents.get(canonUri(uri));
+    },
+  });
 
-  // const virtualDocumentContents = new Map<string, string>();
+  workspace.onDidOpenTextDocument((document) => {
+    LOGHERE("opened document");
+    const doc = document.getText();
+    const att = getAttachments(document.uri, doc, true);
 
-  // workspace.registerTextDocumentContentProvider('embedded-content', {
-  // 	provideTextDocumentContent: uri => {
-  // 		const originalUri = uri.path.slice(1).slice(0, -4);
-  // 		const decodedUri = decodeURIComponent(originalUri);
-  // 		return virtualDocumentContents.get(decodedUri);
-  // 	}
-  // });
+    att.lang2vdoc = {};
+    const originalUri = encodeURIComponent(document.uri.toString(true));
+    for (const injection of att.injections) {
+      const vdocUriString = `embedded-content://${injection.language}/${originalUri}.${injection.language}`;
+      const vdocUri = Uri.parse(vdocUriString);
+      att.lang2vdoc[injection.language] = vdocUri;
+    }
+    for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
+      virtualDocumentContents.set(
+        canonUri(vdocUri),
+        filterDocContent(
+          doc,
+          att.injections.filter((x) => x.language === language)
+        )
+      );
+    }
+  });
+  workspace.onDidChangeTextDocument((e) => {
+    const document = e.document;
+    const doc = document.getText();
+    const att = getAttachments(document.uri, doc, true);
 
-  // const clientOptions: LanguageClientOptions = {
-  // 	documentSelector: [{ scheme: 'file', language: 'html1' }],
-  // 	middleware: {
-  // 		provideCompletionItem: async (document, position, context, token, next) => {
-  // 			// If not in `<style>`, do not perform request forwarding
-  // 			if (!isInsideStyleRegion(htmlLanguageService, document.getText(), document.offsetAt(position))) {
-  // 				return await next(document, position, context, token);
-  // 			}
+    att.lang2vdoc = {};
+    const originalUri = encodeURIComponent(document.uri.toString(true));
+    for (const injection of att.injections) {
+      const vdocUriString = `embedded-content://${injection.language}/${originalUri}.${injection.language}`;
+      const vdocUri = Uri.parse(vdocUriString);
+      att.lang2vdoc[injection.language] = vdocUri;
+    }
+    for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
+      virtualDocumentContents.set(
+        canonUri(vdocUri),
+        filterDocContent(
+          doc,
+          att.injections.filter((x) => x.language === language)
+        )
+      );
+    }
+    // TODO(rtk0c): optimized incremental reparse
+    // for (const ch of e.contentChanges) {
+    //   const st = e.document.offsetAt(ch.range.start);
+    //   const ed = e.document.offsetAt(ch.range.end);
+    // }
+  });
 
-  // 			const originalUri = document.uri.toString(true);
-  // 			virtualDocumentContents.set(originalUri, getCSSVirtualContent(htmlLanguageService, document.getText()));
+  workspace.onDidCloseTextDocument((e) => {
+    documentAttachments.delete(e.uri);
+    virtualDocumentContents.delete(canonUri(e.uri));
+  });
+  const clientOptions: LanguageClientOptions = {
+    documentSelector: [{ scheme: "file", language: "cpp" }],
+    middleware: {
+      provideCompletionItem: async (
+        document,
+        position,
+        context,
+        token,
+        next
+      ) => {
+        const doc = document.getText();
 
-  // 			const vdocUriString = `embedded-content://css/${encodeURIComponent(
-  // 				originalUri
-  // 			)}.css`;
-  // 			const vdocUri = Uri.parse(vdocUriString);
-  // 			return await commands.executeCommand<CompletionList>(
-  // 				'vscode.executeCompletionItemProvider',
-  // 				vdocUri,
-  // 				position,
-  // 				context.triggerCharacter
-  // 			);
-  // 		}
-  // 	}
-  // };
+        const attachments = getAttachments(document.uri, doc, false);
+        const injection = getInjectionAtPosition(
+          attachments.injections,
+          document.offsetAt(position)
+        );
 
-  // // Create the language client and start the client.
-  // client = new LanguageClient(
-  // 	'languageServerExample',
-  // 	'Language Server Example',
-  // 	serverOptions,
-  // 	clientOptions
-  // );
+        // If not in an injection fragment, forward the request to primary LS directly
+        if (!injection) {
+          return await next(document, position, context, token);
+        }
 
-  // // Start the client. This will also launch the server
-  // client.start();
+        // Otherwise, forward to minion LS
+        return await commands.executeCommand<vscode.CompletionList>(
+          "vscode.executeCompletionItemProvider",
+          attachments.lang2vdoc[injection.language],
+          position,
+          context.triggerCharacter
+        );
+      },
+    },
+  };
 
+  // Create the language client and start the client.
+  theClient = new LanguageClient(
+    "lahacksDemo",
+    "C++ (Fancy)",
+    serverOptions,
+    clientOptions
+  );
+
+  // Start the client. This will also launch the server
+  theClient.start();
+
+  // ========== AI Linting ==========
   // FIXME(rtk0c): don't read env var in prod, here in dev it's easier than changing a json config file in the slave vscode
-  geminiApiKey =
+  const geminiApiKey: string =
     workspace.getConfiguration().get("lahacks2025.geminiApiKey") ||
     process.env["GEMINI_KEY"];
   ai = new GoogleGenAI({ apiKey: geminiApiKey });
@@ -225,7 +306,7 @@ export function activate(context: ExtensionContext) {
   // get an explanation for why each of them occurred
   // we should probably do thi as send a message to
   // gemini to explain the diagnostics
-  languages.onDidChangeDiagnostics((e) => {
+  languages.onDidChangeDiagnostics((_) => {
     explainDiag(languages.getDiagnostics());
   });
 
@@ -286,8 +367,6 @@ async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
     for (const diagnostic of diags) {
       const doc = await workspace.openTextDocument(uri);
       const contextSrcCode: string = doc.getText();
-      // LOGHERE("thingggggg");
-      // LOGHERE(contextSrcCode);
       // TODO:
       // - have the option to explain something as a quick fix - DONE
       // - have an option to refactor it to fix the diagnostic - TODO later
