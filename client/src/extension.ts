@@ -8,9 +8,17 @@ import {
   CodeActionProvider,
   commands,
   Diagnostic,
+  DocumentHighlightProvider,
+  DocumentSemanticTokensProvider,
   ExtensionContext,
   languages,
+  Position,
+  ProviderResult,
   Range,
+  SemanticTokens,
+  SemanticTokensBuilder,
+  SemanticTokensEdits,
+  SemanticTokensLegend,
   TextDocument,
   Uri,
   window,
@@ -177,6 +185,75 @@ function getInjectionAtPosition(
   return null;
 }
 
+
+function parseTokenType(legends: SemanticTokensLegend, type: number): string {
+  return legends.tokenTypes[type];
+}
+
+function parseTokenModifiers(legends: SemanticTokensLegend, mods: number): string[] {
+  const res = [];
+  for (let j = 0; j < 32; j++) {
+    if (mods & (1 << j)) {
+      res.push(legends.tokenModifiers[j]);
+    }
+  }
+  return res;
+}
+
+// Inspiration from: https://github.com/AlecGhost/tree-sitter-vscode/blob/master/src/extension.ts
+
+// VSCode default token types and modifiers from:
+// https://code.visualstudio.com/api/language-extensions/semantic-highlight-guide#standard-token-types-and-modifiers
+const SEMA_LEGEND = new vscode.SemanticTokensLegend(
+  [
+    'namespace', 'class', 'enum', 'interface', 'struct', 'typeParameter', 'type', 'parameter', 'variable', 'property',
+    'enumMember', 'decorator', 'event', 'function', 'method', 'macro', 'label', 'comment', 'string', 'keyword',
+    'number', 'regexp', 'operator',
+  ],
+  [
+    'declaration', 'definition', 'readonly', 'static', 'deprecated', 'abstract', 'async', 'modification',
+    'documentation', 'defaultLibrary',
+  ],
+);
+
+class MySemanticTokensProvider implements DocumentSemanticTokensProvider {
+  async provideDocumentSemanticTokens(
+    document: TextDocument,
+    _token: CancellationToken,
+  ) {
+    const att = getAttachments(document.uri);
+    if (!att.lang2vdoc) { return null; }
+
+    const bd = new SemanticTokensBuilder();
+    for (const vdocUri of Object.values(att.lang2vdoc)) {
+      const legends = await commands.executeCommand<SemanticTokensLegend>("vscode.provideDocumentSemanticTokensLegend", vdocUri);
+      const tokens = await commands.executeCommand<SemanticTokens>("vscode.provideDocumentSemanticTokens", vdocUri);
+
+      const d = tokens.data;
+
+      let currLine = 0;
+      let currCol = 0;
+      for (let i = 0; i < d.length; i += 5) {
+        currLine += d[i];
+        if (d[i] == 0) {
+          currCol += d[i + 1];
+        } else {
+          currCol = d[i + 1];
+        }
+        const len = d[i + 2];
+        const rangeStart = new Position(currLine, currCol);
+        const rangeEnd = document.positionAt(document.offsetAt(rangeStart) + len);
+        bd.push(
+          new Range(rangeStart, rangeEnd),
+          parseTokenType(legends, d[i + 3]),
+          parseTokenModifiers(legends, d[i + 4]),
+        );
+      }
+    }
+    return bd.build();
+  }
+}
+
 // ==============================
 // Extension code
 // ==============================
@@ -199,11 +276,21 @@ export function activate(context: ExtensionContext) {
       transport: TransportKind.ipc,
     },
   };
-  workspace.registerTextDocumentContentProvider("embedded-content", {
-    provideTextDocumentContent: (uri) => {
-      return virtualDocumentContents.get(withExtensionUri(uri));
-    },
-  });
+  context.subscriptions.push(
+    workspace.registerTextDocumentContentProvider("embedded-content", {
+      provideTextDocumentContent: (uri) => {
+        return virtualDocumentContents.get(withExtensionUri(uri));
+      },
+    })
+  );
+
+  context.subscriptions.push(
+    languages.registerDocumentSemanticTokensProvider(
+      "*",
+      new MySemanticTokensProvider(),
+      SEMA_LEGEND,
+    )
+  );
 
   const refreshDocument = (document: TextDocument) => {
     const doc = document.getText();
