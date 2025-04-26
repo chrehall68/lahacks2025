@@ -574,9 +574,11 @@ async function makeAIPoweredDiagnostics(doc: TextDocument): Promise<void> {
   The diagnostics should take into account things that a normal language 
   server can't take into account (IE doing \`in\` on a python list is much slower 
   than doing it on a set, suggesting that two nested for loops might be able to 
-  be optimized into one loop if some trick is used, suggesting that Python classes
+  be optimized into one loop if some trick is used. Furthermore, Python classes
   shouldn't use getters and setters, or any other thing that a senior developer 
-  would know about and a normal language server wouldn't). 
+  would know about and a normal language server wouldn't). DO NOT include trivial notes, 
+  such as poor naming and the like. Only include notes regarding significant optimization 
+  and significant readability improvements.
   The diagnostics should be of the format:
 
 type Diagnostic {
@@ -602,7 +604,7 @@ ${processedText}
 `;
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.0-flash",
+    model: "gemini-2.5-pro-exp-03-25",
     contents: prompt,
     config: {
       temperature: 0,
