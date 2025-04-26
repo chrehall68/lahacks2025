@@ -529,7 +529,9 @@ class MyCodeActionProvider implements CodeActionProvider {
     token: CancellationToken
   ): CodeAction[] {
     return fixes.filter(
-      (fix) => fix.command.arguments[0].uri === document.uri.toString()
+      (fix) =>
+        fix.command.arguments[0].uri === document.uri.toString() &&
+        fix.diagnostics[0].range.isEqual(range)
     );
   }
 }
