@@ -72,6 +72,20 @@
       },
       {
         "injectTo": [
+          "source.js",
+          "source.js.jsx",
+          "source.jsx",
+          "source.ts",
+          "source.tsx"
+        ],
+        "scopeName": "inline.js.glsl",
+        "path": "./syntaxes/js-glsl.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.glsl": "glsl"
+        }
+      },
+      {
+        "injectTo": [
           "source.c",
           "source.h",
           "source.cc",

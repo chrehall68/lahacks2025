@@ -458,11 +458,11 @@ export function activate(context: ExtensionContext) {
     workspace.onDidOpenTextDocument(makeAIPoweredDiagnostics)
   );
 
-    // handle documents already open when extension activates
-    const activeDocument = window.activeTextEditor?.document;
-    if (activeDocument) {
-      makeAIPoweredDiagnostics(activeDocument);
-    }
+  // handle documents already open when extension activates
+  const activeDocument = window.activeTextEditor?.document;
+  if (activeDocument) {
+    makeAIPoweredDiagnostics(activeDocument);
+  }
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
