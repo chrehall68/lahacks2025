@@ -4,11 +4,19 @@ import {
   commands,
   CompletionList,
   ExtensionContext,
+  Position,
+  TextDocument,
   Uri,
   workspace,
 } from "vscode";
-import { LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient";
+import { DocumentSymbolRequest, LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient";
 
+interface TextDocumentAttachments {
+  injections?: Region[];
+  lang2vdoc?: Record<string, Uri>;
+}
+
+const documentAttachments = new Map<Uri, TextDocumentAttachments>();
 const virtualDocumentContents = new Map<string, string>();
 
 let theClient: LanguageClient;
@@ -19,11 +27,12 @@ function canonUri(uri: Uri): string {
 }
 
 interface Region {
+  language: string;
   start: number;
   end: number;
 }
 
-function filterDocContent(doc: string, regions: Region[]): string {
+function filterDocContent(doc: string, regions: Iterable<Region>): string {
   let content = doc.replace(/[^\n]/g, ' ');
   for (const r of regions) {
     content = content.slice(0, r.start) + doc.slice(r.start, r.end) + content.slice(r.end);
@@ -46,17 +55,46 @@ function parseInjections(doc: string): Region[] {
     const send = sendRx.exec(doc);
     if (!send) { return regions; }
 
-    regions.push({ start: sbeg.index + sbeg[0].length, end: send.index });
+    regions.push({
+      language: match[1],
+      start: sbeg.index + sbeg[0].length,
+      end: send.index,
+    });
     // Look for injection annotation after this snippet
     rx.lastIndex = send.index;
   }
   return regions;
 }
 
+function getAttachments(uri: Uri, doc: string): TextDocumentAttachments {
+  let res = documentAttachments.get(uri);
+  if (res) { return res; }
+  res = {};
+  documentAttachments.set(uri, res);
+  res.injections = parseInjections(doc);
+  return res;
+}
+
+function getInjectionAtPosition(
+  regions: Region[],
+  offset: number
+): Region | null {
+  for (const region of regions) {
+    if (region.start <= offset) {
+      if (offset <= region.end) {
+        return region;
+      }
+    } else {
+      break;
+    }
+  }
+  return null;
+}
+
 export function activate(context: ExtensionContext) {
   testParseInjections();
 
-  
+
   // If the extension is launched in debug mode then the debug server options are used
   // Otherwise the run options are used
   const serverOptions: ServerOptions = {
@@ -69,15 +107,37 @@ export function activate(context: ExtensionContext) {
     }
   });
 
-  workspace.onDidChangeTextDocument(e => {
-    for (const ch of e.contentChanges) {
-      const st = e.document.offsetAt(ch.range.start);
-      const ed = e.document.offsetAt(ch.range.end);
+  workspace.onDidOpenTextDocument(document => {
+    const doc = document.getText();
+    const att = getAttachments(document.uri, doc);
 
+    att.lang2vdoc = {};
+    const originalUri = encodeURIComponent(document.uri.toString(true));
+    for (const injection of att.injections) {
+      const vdocUriString = `embedded-content://${injection.language}/${originalUri}.${injection.language}`;
+      const vdocUri = Uri.parse(vdocUriString);
+      att.lang2vdoc[injection.language] = vdocUri;
+    }
+    for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
+      virtualDocumentContents.set(
+        canonUri(vdocUri),
+        filterDocContent(doc, att.injections.filter(x => x.language === language)),
+      );
     }
   });
 
+  workspace.onDidChangeTextDocument(e => {
+    getAttachments(e.document.uri, e.document.getText());
+
+    // TODO(rtk0c): optimized incremental reparse
+    // for (const ch of e.contentChanges) {
+    //   const st = e.document.offsetAt(ch.range.start);
+    //   const ed = e.document.offsetAt(ch.range.end);
+    // }
+  });
+
   workspace.onDidCloseTextDocument(e => {
+    documentAttachments.delete(e.uri);
     virtualDocumentContents.delete(canonUri(e.uri));
   });
 
@@ -85,24 +145,20 @@ export function activate(context: ExtensionContext) {
     documentSelector: [{ scheme: 'file', language: 'cpp' }],
     middleware: {
       provideCompletionItem: async (document, position, context, token, next) => {
-        const injectionLang = "";
-        // !isInsideStyleRegion(htmlLanguageService, document.getText(), document.offsetAt(position))
+        const doc = document.getText();
+
+        const attachments = getAttachments(document.uri, doc);
+        const injection = getInjectionAtPosition(attachments.injections, document.offsetAt(position));
 
         // If not in an injection fragment, forward the request to primary LS directly
-        if (!injectionLang) {
+        if (!injection) {
           return await next(document, position, context, token);
         }
 
         // Otherwise, forward to minion LS
-        const originalUri = encodeURIComponent(document.uri.toString(true));
-        // TODO
-        virtualDocumentContents.set(originalUri, "");
-
-        const vdocUriString = `embedded-content://${injectionLang}/${originalUri}.${injectionLang}`;
-        const vdocUri = Uri.parse(vdocUriString);
         return await commands.executeCommand<CompletionList>(
           'vscode.executeCompletionItemProvider',
-          vdocUri,
+          attachments.lang2vdoc[injection.language],
           position,
           context.triggerCharacter
         );
