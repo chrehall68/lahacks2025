@@ -109,13 +109,13 @@ function parseInjections(doc: string, rx: FragmentDelims): Region[] {
     rx.sbeg.lastIndex = match.index + match[0].length;
     const sbeg = rx.sbeg.exec(doc);
     if (!sbeg) {
-      return regions;
+      break;
     }
 
     rx.send.lastIndex = sbeg.index + sbeg[0].length;
     const send = rx.send.exec(doc);
     if (!send) {
-      return regions;
+      break;
     }
 
     regions.push({
@@ -125,6 +125,28 @@ function parseInjections(doc: string, rx: FragmentDelims): Region[] {
     });
     // Look for injection annotation after this snippet
     rxInjectionTag.lastIndex = send.index;
+  }
+  return regions;
+}
+
+function parseMarkdownInjections(doc: string): Region[] {
+  const rxInjectionBeg = /```([^\n]+)\n/g;
+  let match: RegExpExecArray;
+  const regions: Region[] = [];
+  while ((match = rxInjectionBeg.exec(doc)) !== null) {
+    // FIXME(rtk0c): markdown probably has a way to escape ``` inside a codeblock
+    const rxInjectionEnd = /```/g;
+    rxInjectionEnd.lastIndex = match.index + match[0].length;
+    const end = rxInjectionEnd.exec(doc);
+    if (!end) {
+      break;
+    }
+
+    regions.push({
+      langFileExt: match[1],
+      start: match.index + match[0].length,
+      end: end.index,
+    });
   }
   return regions;
 }
@@ -187,7 +209,11 @@ export function activate(context: ExtensionContext) {
     const doc = document.getText();
     const att = getAttachments(document.uri);
 
-    att.injections = parseInjections(doc, fragdelimsFor[document.languageId]);
+    if (document.languageId == "markdown") {
+      att.injections = parseMarkdownInjections(doc);
+    } else {
+      att.injections = parseInjections(doc, fragdelimsFor[document.languageId]);
+    }
 
     att.lang2vdoc = {};
     const originalUri = encodeURIComponent(document.uri.toString(true));
