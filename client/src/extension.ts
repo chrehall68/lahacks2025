@@ -19,9 +19,13 @@ import {
   workspace,
 } from "vscode";
 
+import { Mutex } from "async-mutex";
+import { spawn } from "child_process";
 import * as path from "path";
 import * as showdown from "showdown";
+import { JSONRPCEndpoint } from "ts-lsp-client";
 import {
+  InitializeParams,
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
@@ -35,6 +39,12 @@ function LOGHERE(...args) {
 // ==============================
 //  Globals
 // ==============================
+const documentInitialized = new Map<string, boolean>();
+const lastDocumentVersion = new Map<string, number>();
+const lastDocumentLength = new Map<
+  string,
+  { line: number; character: number }
+>();
 const documentAttachments = new Map<Uri, TextDocumentAttachments>();
 const virtualDocumentContents = new Map<string, string>();
 const documentToVirtual = new Map<string, string[]>();
@@ -45,6 +55,9 @@ let fixes: CodeAction[];
 let ai: GoogleGenAI;
 let quickfixProvider: DiagnosticAggregatorViewProvider;
 let AIPoweredDiagnostics: vscode.DiagnosticCollection;
+let pyrightEndpoint: JSONRPCEndpoint;
+let clangdEndpoint: JSONRPCEndpoint;
+let mutex = new Mutex();
 
 // ==============================
 //  Language server code
@@ -90,18 +103,18 @@ function filterDocContent(doc: string, regions: Iterable<Region>): string {
 }
 
 interface FragmentDelims {
-  sbeg: RegExp,
-  send: RegExp,
+  sbeg: RegExp;
+  send: RegExp;
 }
 
 // HERE BE DRAGON: RegExp.lastIndex is the only state of the matching machinery, and since this is single-threaded, we don't care about sharing RegExp objects
 const fragdelimsFor: Record<LangId, FragmentDelims> = {
-  'cpp': { sbeg: /R"""\(/g, send: /\)"""/g },
-  'python': { sbeg: /"""/g, send: /"""/g },
+  cpp: { sbeg: /R"""\(/g, send: /\)"""/g },
+  python: { sbeg: /"""/g, send: /"""/g },
   // HERE BE DRAGON: just ignore escaped \` for this demo...
-  'javascript': { sbeg: /`/g, send: /`/g },
-  'typescript': { sbeg: /`/g, send: /`/g },
-}
+  javascript: { sbeg: /`/g, send: /`/g },
+  typescript: { sbeg: /`/g, send: /`/g },
+};
 
 // TODO support only parse for begin delimiter on the next line, to prevent misuses
 function parseInjections(doc: string, rx: FragmentDelims): Region[] {
@@ -183,17 +196,25 @@ function getInjectionAtPosition(
 class InjectionCodeLensProvider implements CodeLensProvider {
   onDidChangeCodeLenses?: vscode.Event<void>;
 
-  provideCodeLenses(document: TextDocument, token: CancellationToken): vscode.ProviderResult<vscode.CodeLens[]> {
+  provideCodeLenses(
+    document: TextDocument,
+    token: CancellationToken
+  ): vscode.ProviderResult<vscode.CodeLens[]> {
     const att = getAttachments(document.uri);
     const codeLenses = [];
     for (const injection of att.injections) {
-      const range = new Range(document.positionAt(injection.start), document.positionAt(injection.end));
-      codeLenses.push(new CodeLens(range, {
-        title: "New Tab",
-        tooltip: "Open injected fragment in a new buffer",
-        command: "lahacks2025.openFragment",
-        arguments: [att.lang2vdoc[injection.langFileExt]],
-      }));
+      const range = new Range(
+        document.positionAt(injection.start),
+        document.positionAt(injection.end)
+      );
+      codeLenses.push(
+        new CodeLens(range, {
+          title: "New Tab",
+          tooltip: "Open injected fragment in a new buffer",
+          command: "lahacks2025.openFragment",
+          arguments: [att.lang2vdoc[injection.langFileExt]],
+        })
+      );
     }
     return codeLenses;
   }
@@ -202,9 +223,63 @@ class InjectionCodeLensProvider implements CodeLensProvider {
 // ==============================
 // Extension code
 // ==============================
-export function activate(context: ExtensionContext) {
-  testParseInjections();
+function initPyright() {
+  const serverProcess = spawn(
+    "/home/eliot/.local/share/nvim/mason/bin/pyright-langserver",
+    //"/home/eliot/Documents/GitHub/lahacks2025/pyright.sh",
+    ["--stdio"]
+  );
+  console.log("starting pyright");
+  pyrightEndpoint = new JSONRPCEndpoint(
+    serverProcess.stdin!,
+    serverProcess.stdout!
+  );
 
+  pyrightEndpoint.notify("initialized");
+
+  console.log("finished starting pyright");
+}
+
+function initClangd() {
+  const serverProcess = spawn(
+    //"/home/eliot/Documents/GitHub/lahacks2025/clangd.sh",
+    "/usr/bin/clangd",
+    ["--limit-results=20"]
+  );
+  console.log("starting clangd");
+  clangdEndpoint = new JSONRPCEndpoint(
+    serverProcess.stdin!,
+    serverProcess.stdout!,
+    {
+      captureRejections: true,
+      autoDestroy: true,
+    }
+  );
+  clangdEndpoint.send("initialize", {
+    processId: process.pid,
+    capabilities: {
+      textDocument: {
+        completion: {
+          completionItem: {
+            snippetSupport: false,
+          },
+          contextSupport: false,
+        },
+      },
+    },
+  } as InitializeParams);
+  clangdEndpoint.on("textDocument/publishDiagnostics", (params) => {
+    LOGHERE("textDocument/publishDiagnostics", params);
+  });
+
+  clangdEndpoint.notify("initialized");
+
+  console.log("finished starting clangd");
+}
+
+export function activate(context: ExtensionContext) {
+  initPyright();
+  initClangd();
   // ========== Language server ==========
   // If the extension is launched in debug mode then the debug server options are used
   // Otherwise the run options are used
@@ -221,15 +296,20 @@ export function activate(context: ExtensionContext) {
       transport: TransportKind.ipc,
     },
   };
-  const contentProvider = new class implements vscode.TextDocumentContentProvider {
+  const contentProvider = new (class
+    implements vscode.TextDocumentContentProvider
+  {
     onDidChangeEmitter = new vscode.EventEmitter<vscode.Uri>();
     onDidChange = this.onDidChangeEmitter.event;
 
     provideTextDocumentContent(uri) {
       return virtualDocumentContents.get(withExtensionUri(uri));
     }
-  };
-  workspace.registerTextDocumentContentProvider("embedded-content", contentProvider,);
+  })();
+  workspace.registerTextDocumentContentProvider(
+    "embedded-content",
+    contentProvider
+  );
 
   const refreshDocument = (document: TextDocument) => {
     const doc = document.getText();
@@ -250,7 +330,8 @@ export function activate(context: ExtensionContext) {
     }
 
     // clear out anything existing
-    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) || []) {
+    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
+      []) {
       virtualDocumentContents.delete(prevVirtual);
     }
     // then set new ones
@@ -271,7 +352,7 @@ export function activate(context: ExtensionContext) {
     }
   };
   workspace.onDidOpenTextDocument(refreshDocument);
-  workspace.onDidChangeTextDocument(e => refreshDocument(e.document));
+  workspace.onDidChangeTextDocument((e) => refreshDocument(e.document));
 
   workspace.onDidCloseTextDocument((e) => {
     documentAttachments.delete(e.uri);
@@ -281,7 +362,10 @@ export function activate(context: ExtensionContext) {
     documentToVirtual.delete(e.uri.toString());
   });
   const clientOptions: LanguageClientOptions = {
-    documentSelector: ["*"],
+    documentSelector: [
+      { scheme: "file", language: "*" },
+      { scheme: "embedded-content", language: "*" },
+    ],
     middleware: {
       provideCompletionItem: async (
         document,
@@ -298,7 +382,104 @@ export function activate(context: ExtensionContext) {
 
         // If not in an injection fragment, forward the request to primary LS directly
         if (!injection) {
-          return await next(document, position, context, token);
+          if (document.uri.scheme === "embedded-content") {
+            let endpoint: JSONRPCEndpoint;
+            let extension: string;
+            if (document.languageId === "python") {
+              endpoint = pyrightEndpoint;
+              extension = "py";
+            } else if (document.languageId === "cpp") {
+              endpoint = clangdEndpoint;
+              extension = "cpp";
+            } else {
+              return next(document, position, context, token);
+            }
+
+            // call language server
+            const doc = document.getText();
+            const muxResult = await mutex.runExclusive(async () => {
+              if (!documentInitialized.get(document.uri.toString())) {
+                console.log("Sending textDocument/didOpen");
+                documentInitialized.set(document.uri.toString(), true);
+                lastDocumentVersion.set(document.uri.toString(), 0);
+                endpoint.notify("textDocument/didOpen", {
+                  textDocument: {
+                    uri: canonUri(document.uri) + "." + extension,
+                    languageId: document.languageId,
+                    version: document.version,
+                    text: doc,
+                  },
+                });
+              } else {
+                console.log(
+                  "Sending didChange with version",
+                  lastDocumentVersion.get(document.uri.toString())
+                );
+                endpoint.notify("textDocument/didChange", {
+                  textDocument: {
+                    uri: canonUri(document.uri) + "." + extension,
+                    version: lastDocumentVersion.get(document.uri.toString()),
+                  },
+                  contentChanges: [
+                    {
+                      range: {
+                        start: { line: 0, character: 0 },
+                        end: {
+                          line:
+                            lastDocumentLength.get(document.uri.toString())
+                              .line - 1,
+                          character: lastDocumentLength.get(
+                            document.uri.toString()
+                          ).character,
+                        },
+                      },
+                      text: doc,
+                    },
+                  ],
+                });
+                lastDocumentVersion.set(
+                  document.uri.toString(),
+                  lastDocumentVersion.get(document.uri.toString()) + 1
+                );
+                await new Promise((resolve) => setTimeout(resolve, 100));
+              }
+              const lines = doc.split("\n");
+              lastDocumentLength.set(document.uri.toString(), {
+                line: lines.length,
+                character: lines[lines.length - 1].length,
+              });
+              console.log("Sent textDocument/didOpen and didChange");
+              console.log("Trying to get language server response");
+              const completionResult: { items: vscode.CompletionItem[] } =
+                await endpoint.send("textDocument/completion", {
+                  textDocument: {
+                    uri: canonUri(document.uri) + "." + extension,
+                  },
+                  position: position,
+                  context: context,
+                });
+              console.log(
+                "Language server completion result",
+                completionResult
+              );
+              return completionResult;
+            });
+
+            if (muxResult) {
+              const results: vscode.CompletionItem[] = [];
+              for (const item of muxResult.items) {
+                const it = new vscode.CompletionItem(item.label);
+                it.kind = item.kind;
+                it.sortText = item.sortText;
+                results.push(it);
+              }
+              return results;
+            }
+          }
+
+          const res = await next(document, position, context, token);
+          LOGHERE("Result was", res);
+          return res;
         }
 
         // const d = await workspace.openTextDocument(
@@ -307,6 +488,9 @@ export function activate(context: ExtensionContext) {
         // await window.showTextDocument(d, { preview: false });
 
         // Otherwise, forward to minion LS
+        const otherDoc = await workspace.openTextDocument(
+          attachments.lang2vdoc[injection.language]
+        );
         const res = await commands.executeCommand<vscode.CompletionList>(
           "vscode.executeCompletionItemProvider",
           attachments.lang2vdoc[injection.langFileExt],
@@ -333,13 +517,10 @@ export function activate(context: ExtensionContext) {
     languages.registerCodeLensProvider("*", new InjectionCodeLensProvider())
   );
   context.subscriptions.push(
-    commands.registerCommand(
-      "lahacks2025.openFragment",
-      async (vdocUri) => {
-        const document = await workspace.openTextDocument(vdocUri);
-        await window.showTextDocument(document);
-      },
-    )
+    commands.registerCommand("lahacks2025.openFragment", async (vdocUri) => {
+      const document = await workspace.openTextDocument(vdocUri);
+      await window.showTextDocument(document);
+    })
   );
 
   // ========== AI Linting ==========
@@ -450,13 +631,21 @@ export function activate(context: ExtensionContext) {
 
   // Listen for saves
   context.subscriptions.push(
-    workspace.onDidSaveTextDocument(makeAIPoweredDiagnostics)
+    workspace.onDidSaveTextDocument(async (e) => {
+      if (e.uri.scheme != "embedded-content") {
+        await makeAIPoweredDiagnostics(e);
+      }
+    })
   );
 
   // Listen for file opens
-  context.subscriptions.push(
-    workspace.onDidOpenTextDocument(makeAIPoweredDiagnostics)
-  );
+  // context.subscriptions.push(
+  //   workspace.onDidOpenTextDocument(async (e) => {
+  //     if (e.uri.scheme != "embedded-content") {
+  //       await makeAIPoweredDiagnostics(e);
+  //     }
+  //   })
+  // );
 
   // handle documents already open when extension activates
   const activeDocument = window.activeTextEditor?.document;
@@ -466,7 +655,7 @@ export function activate(context: ExtensionContext) {
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) { }
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -720,7 +909,7 @@ export async function deactivate(): Promise<void> {
 
 function testParseInjections() {
   const i = '// @LANGUAGE: sql@\nauto s = R"""(some code here)"""';
-  const pp = parseInjections(i, fragdelimsFor['cpp']);
+  const pp = parseInjections(i, fragdelimsFor["cpp"]);
   const sec = i.substring(pp[0].start, pp[0].end);
   return sec;
 }
