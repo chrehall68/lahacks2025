@@ -13,14 +13,14 @@ import {
   languages,
   Range,
   TextDocument,
-  TreeDataProvider,
-  TreeItem,
   Uri,
   window,
   workspace,
 } from "vscode";
 
-import { LanguageClient, MarkedString } from "vscode-languageclient";
+import * as showdown from "showdown";
+import { LanguageClient } from "vscode-languageclient";
+const converter = new showdown.Converter();
 
 function LOGHERE(...args) {
   console.log("[LAHACKS2025]", ...args);
@@ -35,8 +35,7 @@ let geminiApiKey: string;
 let ai: GoogleGenAI;
 let lastFixContext: string;
 let fixes: CodeAction[];
-let quickfixProvider: DummyProvider;
-let quickfixTree: vscode.TreeView<TreeItem>;
+let quickfixProvider: DiagnosticAggregatorViewProvider;
 
 export function activate(context: ExtensionContext) {
   // // The server is implemented in node
@@ -115,14 +114,12 @@ export function activate(context: ExtensionContext) {
       }
     )
   );
-  quickfixProvider = new DummyProvider();
-  quickfixTree = window.createTreeView("quickfixSidebarView", {
-    treeDataProvider: quickfixProvider,
-  });
-  quickfixTree.message =
-    "Hi there this is a rather long message. Lorem ipsum doloret";
-  console.log("Registered!");
+  quickfixProvider = new DiagnosticAggregatorViewProvider(context.extensionUri);
+  context.subscriptions.push(
+    window.registerWebviewViewProvider("quickfixSidebarView", quickfixProvider)
+  );
 
+  // callback for the command
   context.subscriptions.push(
     commands.registerCommand(
       "quickfixSidebar.show",
@@ -130,21 +127,22 @@ export function activate(context: ExtensionContext) {
         lastFixContext = contextArg.uri;
         LOGHERE("lastFixContext", lastFixContext, contextArg.diagnostic);
         // Call Gemini API using the ai client
+        // TODO(rtk0c): prompt engineer better
         const result = await ai.models.generateContent({
           model: "gemini-2.0-flash",
           contents:
-            "Explain this diagnostic. Do not use markdown. Keep your response to roughly 1 paragraph. Diagnostic: " +
+            "Explain this diagnostic. Keep your response to roughly 1 paragraph. Diagnostic: " +
             contextArg.diagnostic.message,
         });
-        const explanation = MarkedString.fromPlainText(
-          result.candidates[0].content.parts[0].text
-        );
+        const explanation = result.candidates[0].content.parts[0].text;
 
-        // TODO - actually use html or markdown instead of just plain text...
-        quickfixTree.message = `Explanation for diagnostic\n\nDiagnostic:\n ${contextArg.diagnostic.message}\n\nExplanation:\n ${explanation}`;
-        quickfixTree.reveal(quickfixProvider.getTreeItem(new MyItem()), {
-          select: false,
-        });
+        // Set the content of the view
+        const html = converter.makeHtml(explanation);
+        quickfixProvider.currentWebview.html = `<p>${html}</p>`;
+        // Open the view
+        await vscode.commands.executeCommand(
+          "workbench.view.extension.quickfixSidebar"
+        );
       }
     )
   );
@@ -159,44 +157,29 @@ export function activate(context: ExtensionContext) {
   });
 }
 
-/**
- * Provider that literally does nothing. Main purpose is so that
- * we can make a tree view and use its message field
- */
-export class DummyProvider implements TreeDataProvider<TreeItem> {
-  private _onDidChangeTreeData: vscode.EventEmitter<
-    TreeItem | undefined | void
-  > = new vscode.EventEmitter<TreeItem | undefined | void>();
+class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
-  refresh(): void {
-    this._onDidChangeTreeData.fire();
+  resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    context: vscode.WebviewViewResolveContext,
+    token: vscode.CancellationToken
+  ) {
+    webviewView.webview.options = {
+      enableScripts: true,
+    };
+
+    webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
+
+    // Save reference for updating later
+    this.currentWebview = webviewView.webview;
   }
 
-  getTreeItem(element: TreeItem): vscode.TreeItem {
-    return element;
+  getHtmlForWebview(webview: vscode.Webview): string {
+    return "<div>Press The QuickFix Explain item to see the explanation for a diagnostic here</div>";
   }
 
-  // this is also kinda useless
-  // since we manually edit the message
-  getChildren(element?: TreeItem): Thenable<TreeItem[]> {
-    return Promise.resolve([]);
-  }
-
-  // literally useless
-  // just needed that way I can do .reveal()
-  getParent(element: vscode.TreeItem): vscode.ProviderResult<vscode.TreeItem> {
-    return null;
-  }
-}
-
-export class MyItem extends vscode.TreeItem {
-  constructor() {
-    super("myLabel", vscode.TreeItemCollapsibleState.None);
-
-    this.description = "this is some text";
-  }
-
-  contextValue = "dependency";
+  public currentWebview?: vscode.Webview;
 }
 
 class MyCodeActionProvider implements CodeActionProvider {
@@ -224,10 +207,9 @@ async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
       const contextSrcCode: string = doc.getText();
       // LOGHERE("thingggggg");
       // LOGHERE(contextSrcCode);
-      // TODO(rtk0c): prompt engineer better
       // TODO:
-      // - have the option to explain something as a quick fix
-      // - have an option to refactor it to fix the diagnostic
+      // - have the option to explain something as a quick fix - DONE
+      // - have an option to refactor it to fix the diagnostic - TODO later
 
       // explain something as a quick fix
       const fix = new CodeAction("Explain", CodeActionKind.QuickFix);
@@ -239,23 +221,6 @@ async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
       };
       LOGHERE("made fix", fix);
       fixes.push(fix);
-      //const question = `Explain this diagnostic: ${diagnostic.message}\n${contextSrcCode}`;
-      //const answer = await window.showInformationMessage(question, "Explain");
-      //if (answer === "Explain") {
-      //  // Call Gemini API using the ai client
-      //  const result = await ai.models.generateContent({
-      //    model: "gemini-2.0-flash",
-      //    contents: question,
-      //  });
-      //  LOGHERE("diagnostic", diagnostic);
-      //  LOGHERE(result);
-      //  const explanation = MarkedString.fromPlainText(
-      //    result.candidates[0].content.parts[0].text
-      //  );
-      //  window.showInformationMessage(
-      //    `Explanation for: ${diagnostic.message} - ${explanation}`
-      //  );
-      //}
     }
   }
 }

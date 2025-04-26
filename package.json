@@ -25,25 +25,26 @@
         "title": "Show Quickfix Sidebar"
       }
     ],
-	"viewsContainers": {
-		"activitybar": [
-			{
-				"id": "quickfix-sidebar",
-				"title": "Quickfix Sidebar 1",
-				"icon": "media/dep.svg"
-			}
-		]
-	},
-	"views": {
-		"quickfix-sidebar": [
-			{
-				"id": "quickfixSidebarView",
-				"name": "Quickfix Sidebar 2",
-				"icon": "media/dep.svg",
-				"contextualTitle": "Quickfix Sidebar 2"
-			}
-		]
-	}
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "quickfixSidebar",
+          "title": "Quickfix Sidebar 1",
+          "icon": "media/dep.svg"
+        }
+      ]
+    },
+    "views": {
+      "quickfixSidebar": [
+        {
+          "type": "webview",
+          "id": "quickfixSidebarView",
+          "name": "Quickfix Sidebar 2",
+          "icon": "media/dep.svg",
+          "contextualTitle": "Quickfix Sidebar 2"
+        }
+      ]
+    }
   },
   "activationEvents": [
     "*"
