@@ -138,42 +138,46 @@ context.subscriptions.push(
 
       const explanation = result.candidates[0].content.parts[0].text;
 
-      // Set the content of the view FIRST
-      const html = converter.makeHtml(explanation);
-      quickfixProvider.currentWebview.html = `
-        <div>
-          <p>${html}</p>
-          <div id="buttonContainer"></div>
+      const htmlExplanation = converter.makeHtml(explanation);
+quickfixProvider.currentWebview.html = `
+  <div>
+    <div id="renderedExplanation">${htmlExplanation}</div> 
+    <p id="explanationText" style="display: none;">${explanation}</p>
+    <div id="buttonContainer"></div>
 
-          <script>
-            const vscode = acquireVsCodeApi();
-            window.addEventListener('message', event => {
-              const message = event.data;
-              switch (message.command) {
-                case 'showAddChangesButton':
-                  createAddChangesButton();
-                  break;
-                case 'hideAddChangesButton':
-                  clearAddChangesButton();
-                  break;
-              }
-            });
+    <script>
+      const vscode = acquireVsCodeApi();
+      window.addEventListener('message', event => {
+        const message = event.data;
+        switch (message.command) {
+          case 'showAddChangesButton':
+            createAddChangesButton();
+            break;
+          case 'hideAddChangesButton':
+            clearAddChangesButton();
+            break;
+        }
+      });
 
-            function createAddChangesButton() {
-              const container = document.getElementById('buttonContainer');
-              container.innerHTML = '<button id="addChangesButton">Add Changes</button>';
-              document.getElementById('addChangesButton').addEventListener('click', () => {
-                vscode.postMessage({ command: 'addChanges' });
-              });
-            }
+      function createAddChangesButton() {
+        const container = document.getElementById('buttonContainer');
+        container.innerHTML = '<button id="addChangesButton">Add Changes</button>';
+        document.getElementById('addChangesButton').addEventListener('click', () => {
+          const explanationText = document.getElementById('explanationText');
+          vscode.postMessage({
+            command: 'addChanges',
+            explanation: explanationText.innerText
+          });
+        });
+      }
 
-            function clearAddChangesButton() {
-              const container = document.getElementById('buttonContainer');
-              container.innerHTML = '';
-            }
-          </script>
-        </div>
-      `;
+      function clearAddChangesButton() {
+        const container = document.getElementById('buttonContainer');
+        container.innerHTML = '';
+      }
+    </script>
+  </div>
+`;
 
       // Open the view
       await vscode.commands.executeCommand(
@@ -217,11 +221,50 @@ class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
-    webviewView.webview.onDidReceiveMessage(message => {
+    webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.command) {
         case 'addChanges':
-          vscode.window.showInformationMessage('Add Changes button clicked!');
-          // TODO: implement actual logic for "Add Changes" here
+          {
+            if (!lastFixContext) {
+              vscode.window.showErrorMessage('No file context available for applying changes.');
+              return;
+            }
+    
+            const document = await vscode.workspace.openTextDocument(vscode.Uri.parse(lastFixContext));
+            const text = document.getText(); // <-- entire file contents
+    
+            const prompt = `
+You are an expert developer.
+Given the following code and the provided recommendation, modify the code to address the recommendation with minimal changes.
+KEEP the structure, styling, and remove the need for code fences.
+
+Original Code:
+${text}
+
+Recommendation:
+${message.explanation}
+
+Please return ONLY the pure revised code WITHOUT any \`\`\` markers, markdown, or explanations.
+`;
+    
+            const result = await ai.models.generateContent({
+              model: "gemini-2.0-flash",
+              contents: prompt,
+            });
+    
+            const revisedCode = result.candidates[0].content.parts[0].text;
+    
+            const edit = new vscode.WorkspaceEdit();
+            const fullRange = new vscode.Range(
+              document.positionAt(0),
+              document.positionAt(text.length)
+            );
+            edit.replace(document.uri, fullRange, revisedCode);
+            await vscode.workspace.applyEdit(edit);
+    
+            await document.save(); // save automatically
+            vscode.window.showInformationMessage('File successfully updated with AI suggestions!');
+          }
           break;
       }
     });
