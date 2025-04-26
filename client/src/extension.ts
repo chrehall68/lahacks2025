@@ -327,7 +327,7 @@ export function activate(context: ExtensionContext) {
 
         // Call Gemini API using the ai client
         const result = await ai.models.generateContent({
-          model: "gemini-2.0-flash",
+          model: "gemini-2.5-pro-exp-03-25",
           contents:
             "Explain this diagnostic. Keep your response to roughly 1 paragraph. Diagnostic: " +
             contextArg.diagnostic.message,
