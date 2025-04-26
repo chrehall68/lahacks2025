@@ -250,9 +250,8 @@ export function activate(context: ExtensionContext) {
     }
     documentToVirtual.delete(e.uri.toString());
   });
-  const selector: DocumentSelector = "*";
   const clientOptions: LanguageClientOptions = {
-    documentSelector: selector,
+    documentSelector: ["*"],
     middleware: {
       provideCompletionItem: async (
         document,
@@ -311,7 +310,7 @@ export function activate(context: ExtensionContext) {
 
   context.subscriptions.push(
     languages.registerCodeActionsProvider(
-      selector,
+      "*",
       new MyCodeActionProvider(),
       {
         providedCodeActionKinds: MyCodeActionProvider.providedCodeActionKinds,
@@ -410,7 +409,7 @@ export function activate(context: ExtensionContext) {
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(private readonly _extensionUri: vscode.Uri) { }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
