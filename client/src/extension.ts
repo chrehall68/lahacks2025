@@ -25,6 +25,7 @@ import * as path from "path";
 import * as showdown from "showdown";
 import { JSONRPCEndpoint } from "ts-lsp-client";
 import {
+  InitializeParams,
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
@@ -40,6 +41,10 @@ function LOGHERE(...args) {
 // ==============================
 const documentInitialized = new Map<string, boolean>();
 const lastDocumentVersion = new Map<string, number>();
+const lastDocumentLength = new Map<
+  string,
+  { line: number; character: number }
+>();
 const documentAttachments = new Map<Uri, TextDocumentAttachments>();
 const virtualDocumentContents = new Map<string, string>();
 const documentToVirtual = new Map<string, string[]>();
@@ -51,6 +56,7 @@ let ai: GoogleGenAI;
 let quickfixProvider: DiagnosticAggregatorViewProvider;
 let AIPoweredDiagnostics: vscode.DiagnosticCollection;
 let pyrightEndpoint: JSONRPCEndpoint;
+let clangdEndpoint: JSONRPCEndpoint;
 let mutex = new Mutex();
 
 // ==============================
@@ -220,6 +226,7 @@ class InjectionCodeLensProvider implements CodeLensProvider {
 function initPyright() {
   const serverProcess = spawn(
     "/home/eliot/.local/share/nvim/mason/bin/pyright-langserver",
+    //"/home/eliot/Documents/GitHub/lahacks2025/pyright.sh",
     ["--stdio"]
   );
   console.log("starting pyright");
@@ -232,8 +239,47 @@ function initPyright() {
 
   console.log("finished starting pyright");
 }
+
+function initClangd() {
+  const serverProcess = spawn(
+    //"/home/eliot/Documents/GitHub/lahacks2025/clangd.sh",
+    "/usr/bin/clangd",
+    ["--limit-results=20"]
+  );
+  console.log("starting clangd");
+  clangdEndpoint = new JSONRPCEndpoint(
+    serverProcess.stdin!,
+    serverProcess.stdout!,
+    {
+      captureRejections: true,
+      autoDestroy: true,
+    }
+  );
+  clangdEndpoint.send("initialize", {
+    processId: process.pid,
+    capabilities: {
+      textDocument: {
+        completion: {
+          completionItem: {
+            snippetSupport: false,
+          },
+          contextSupport: false,
+        },
+      },
+    },
+  } as InitializeParams);
+  clangdEndpoint.on("textDocument/publishDiagnostics", (params) => {
+    LOGHERE("textDocument/publishDiagnostics", params);
+  });
+
+  clangdEndpoint.notify("initialized");
+
+  console.log("finished starting clangd");
+}
+
 export function activate(context: ExtensionContext) {
   initPyright();
+  initClangd();
   // ========== Language server ==========
   // If the extension is launched in debug mode then the debug server options are used
   // Otherwise the run options are used
@@ -337,17 +383,28 @@ export function activate(context: ExtensionContext) {
         // If not in an injection fragment, forward the request to primary LS directly
         if (!injection) {
           if (document.uri.scheme === "embedded-content") {
-            // call pyright
+            let endpoint: JSONRPCEndpoint;
+            let extension: string;
+            if (document.languageId === "python") {
+              endpoint = pyrightEndpoint;
+              extension = "py";
+            } else if (document.languageId === "cpp") {
+              endpoint = clangdEndpoint;
+              extension = "cpp";
+            } else {
+              return next(document, position, context, token);
+            }
+
+            // call language server
             const doc = document.getText();
-            LOGHERE(doc);
             const muxResult = await mutex.runExclusive(async () => {
               if (!documentInitialized.get(document.uri.toString())) {
                 console.log("Sending textDocument/didOpen");
                 documentInitialized.set(document.uri.toString(), true);
                 lastDocumentVersion.set(document.uri.toString(), 0);
-                pyrightEndpoint.notify("textDocument/didOpen", {
+                endpoint.notify("textDocument/didOpen", {
                   textDocument: {
-                    uri: document.uri.toString(),
+                    uri: canonUri(document.uri) + "." + extension,
                     languageId: document.languageId,
                     version: document.version,
                     text: doc,
@@ -358,16 +415,23 @@ export function activate(context: ExtensionContext) {
                   "Sending didChange with version",
                   lastDocumentVersion.get(document.uri.toString())
                 );
-                pyrightEndpoint.notify("textDocument/didChange", {
+                endpoint.notify("textDocument/didChange", {
                   textDocument: {
-                    uri: document.uri.toString(),
+                    uri: canonUri(document.uri) + "." + extension,
                     version: lastDocumentVersion.get(document.uri.toString()),
                   },
                   contentChanges: [
                     {
                       range: {
                         start: { line: 0, character: 0 },
-                        end: { line: 100000, character: 10000 },
+                        end: {
+                          line:
+                            lastDocumentLength.get(document.uri.toString())
+                              .line - 1,
+                          character: lastDocumentLength.get(
+                            document.uri.toString()
+                          ).character,
+                        },
                       },
                       text: doc,
                     },
@@ -377,18 +441,27 @@ export function activate(context: ExtensionContext) {
                   document.uri.toString(),
                   lastDocumentVersion.get(document.uri.toString()) + 1
                 );
+                await new Promise((resolve) => setTimeout(resolve, 100));
               }
+              const lines = doc.split("\n");
+              lastDocumentLength.set(document.uri.toString(), {
+                line: lines.length,
+                character: lines[lines.length - 1].length,
+              });
               console.log("Sent textDocument/didOpen and didChange");
-              console.log("Trying to get pyright response");
+              console.log("Trying to get language server response");
               const completionResult: { items: vscode.CompletionItem[] } =
-                await pyrightEndpoint.send("textDocument/completion", {
+                await endpoint.send("textDocument/completion", {
                   textDocument: {
-                    uri: document.uri.toString(),
+                    uri: canonUri(document.uri) + "." + extension,
                   },
                   position: position,
                   context: context,
                 });
-              console.log("Pyright completion result", completionResult);
+              console.log(
+                "Language server completion result",
+                completionResult
+              );
               return completionResult;
             });
 
