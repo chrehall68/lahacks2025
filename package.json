@@ -22,36 +22,46 @@
     "configuration": {
       "title": "LAHACKS2025 Settings",
       "properties": {
-        "lahacks2025.geminiApiKey": {
+        "polyglot.geminiApiKey": {
           "type": "string",
           "default": "",
           "description": "Gemini API Key for LAHACKS2025 extension."
+        },
+        "polyglot.pyright-langserver.path": {
+          "type": "string",
+          "default": "pyright-langserver",
+          "description": "Path for pyright-langserver binary used to provide completions for Python"
+        },
+        "polyglot.clangd.path": {
+          "type": "string",
+          "default": "/usr/bin/clangd",
+          "description": "Path for clangd binary used to provide completions for C++"
         }
       }
     },
     "commands": [
       {
-        "command": "quickfixSidebar.show",
-        "title": "Show Quickfix Sidebar"
+        "command": "ourSidebar.show",
+        "title": "Show Passive Copilot Sidebar"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "quickfixSidebar",
-          "title": "Quickfix Sidebar 1",
+          "id": "ourSidebar",
+          "title": "Passive Copilot",
           "icon": "media/dep.svg"
         }
       ]
     },
     "views": {
-      "quickfixSidebar": [
+      "ourSidebar": [
         {
           "type": "webview",
-          "id": "quickfixSidebarView",
-          "name": "Quickfix Sidebar 2",
+          "id": "explanationView",
+          "name": "Explanation",
           "icon": "media/dep.svg",
-          "contextualTitle": "Quickfix Sidebar 2"
+          "contextualTitle": "Explanation"
         }
       ]
     },

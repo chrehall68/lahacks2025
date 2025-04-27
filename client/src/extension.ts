@@ -327,8 +327,7 @@ function charsBetween(a: string, b: string): string[] {
 // ==============================
 function initPyright() {
   const serverProcess = spawn(
-    "/home/eliot/.local/share/nvim/mason/bin/pyright-langserver",
-    //"/home/eliot/Documents/GitHub/lahacks2025/pyright.sh",
+    workspace.getConfiguration().get("polyglot.pyright-langserver.path"),
     ["--stdio"]
   );
   console.log("starting pyright");
@@ -344,8 +343,7 @@ function initPyright() {
 
 function initClangd() {
   const serverProcess = spawn(
-    "/usr/bin/clangd",
-    //"/home/eliot/Documents/GitHub/lahacks2025/clangd.sh",
+    workspace.getConfiguration().get("polyglot.clangd.path"),
     ["--limit-results=20"]
   );
   console.log("starting clangd");
@@ -425,7 +423,7 @@ export function activate(context: ExtensionContext) {
 
   // FIXME(rtk0c): don't read env var in prod, here in dev it's easier than changing a json config file in the slave vscode
   const geminiApiKey: string =
-    workspace.getConfiguration().get("lahacks2025.geminiApiKey") ||
+    workspace.getConfiguration().get("polyglot.geminiApiKey") ||
     process.env["GEMINI_KEY"];
   ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
@@ -437,13 +435,13 @@ export function activate(context: ExtensionContext) {
 
   quickfixProvider = new DiagnosticAggregatorViewProvider(context.extensionUri);
   context.subscriptions.push(
-    window.registerWebviewViewProvider("quickfixSidebarView", quickfixProvider)
+    window.registerWebviewViewProvider("explanationView", quickfixProvider)
   );
 
   // callback for the command
   context.subscriptions.push(
     commands.registerCommand(
-      "quickfixSidebar.show",
+      "ourSidebar.show",
       async (contextArg: { uri: string; diagnostic: vscode.Diagnostic }) => {
         lastFixContext = contextArg.uri;
         LOGHERE("lastFixContext", lastFixContext, contextArg.diagnostic);
@@ -459,6 +457,7 @@ export function activate(context: ExtensionContext) {
         const explanation = result.candidates[0].content.parts[0].text;
 
         const htmlExplanation = converter.makeHtml(explanation);
+        // set contents
         quickfixProvider.currentWebview.html = `
   <div>
     <div id="renderedExplanation">${htmlExplanation}</div> 
@@ -498,10 +497,9 @@ export function activate(context: ExtensionContext) {
     </script>
   </div>
 `;
-
         // Open the view
         await vscode.commands.executeCommand(
-          "workbench.view.extension.quickfixSidebar"
+          "workbench.view.extension.ourSidebar"
         );
 
         // THEN post the message to show the button
@@ -592,7 +590,12 @@ Please return ONLY the pure revised code WITHOUT any \`\`\` markers, markdown, o
               contents: prompt,
             });
 
-            const revisedCode = result.candidates[0].content.parts[0].text;
+            let revisedCode = result.candidates[0].content.parts[0].text;
+            // remove the leading ```(language) and the trailing ```
+            let reg = /^```.*\n/;
+            revisedCode = revisedCode.replace(reg, "");
+            reg = /\n```$/;
+            revisedCode = revisedCode.replace(reg, "");
 
             const edit = new vscode.WorkspaceEdit();
             const fullRange = new vscode.Range(
@@ -617,7 +620,7 @@ Please return ONLY the pure revised code WITHOUT any \`\`\` markers, markdown, o
   getHtmlForWebview(webview: vscode.Webview): string {
     return `
       <div>
-        <p>Press The QuickFix Explain item to see the explanation for a diagnostic here</p>
+        <p>Press the Explain item to see the explanation for a diagnostic here</p>
         <div id="buttonContainer"></div>
       </div>
 
@@ -690,7 +693,7 @@ async function explainDiag(diagnostics: [Uri, Diagnostic[]][]): Promise<void> {
       fix.diagnostics = [diagnostic];
       fix.command = {
         title: "Explain",
-        command: "quickfixSidebar.show",
+        command: "ourSidebar.show",
         arguments: [{ uri: uri.toString(), diagnostic: diagnostic }],
       };
       fixes.push(fix);
