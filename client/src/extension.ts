@@ -21,17 +21,17 @@ import {
 
 import { Mutex } from "async-mutex";
 import { spawn } from "child_process";
-import * as path from "path";
 import * as showdown from "showdown";
 import { JSONRPCEndpoint } from "ts-lsp-client";
+import { InitializeParams } from "vscode-languageclient";
 import {
-  InitializeParams,
-  LanguageClient,
-  LanguageClientOptions,
-  ServerOptions,
-  TransportKind,
-} from "vscode-languageclient";
-import { canonOrigUri, orig2vdoc, FragmentsFS, Region, FS_SCHEME, vdoc2orig } from './injectedDocs';
+  canonOrigUri,
+  FragmentsFS,
+  FS_SCHEME,
+  orig2vdoc,
+  Region,
+  vdoc2orig,
+} from "./injectedDocs";
 
 function LOGHERE(...args) {
   console.log("[LAHACKS]", ...args);
@@ -80,17 +80,25 @@ function getInjectionAtPosition(
 class InjectionCodeLensProvider implements CodeLensProvider {
   onDidChangeCodeLenses?: vscode.Event<void>;
 
-  provideCodeLenses(document: TextDocument, token: CancellationToken): vscode.ProviderResult<vscode.CodeLens[]> {
+  provideCodeLenses(
+    document: TextDocument,
+    token: CancellationToken
+  ): vscode.ProviderResult<vscode.CodeLens[]> {
     const att = fs.files.get(canonOrigUri(document.uri));
     const codeLenses = [];
     for (const injection of att.injections.values()) {
-      const range = new Range(document.positionAt(injection.start), document.positionAt(injection.end));
-      codeLenses.push(new CodeLens(range, {
-        title: "New Tab",
-        tooltip: "Open injected fragment in a new buffer",
-        command: "lahacks2025.openFragment",
-        arguments: [orig2vdoc(document.uri, injection.langFileExt)],
-      }));
+      const range = new Range(
+        document.positionAt(injection.start),
+        document.positionAt(injection.end)
+      );
+      codeLenses.push(
+        new CodeLens(range, {
+          title: "New Tab",
+          tooltip: "Open injected fragment in a new buffer",
+          command: "lahacks2025.openFragment",
+          arguments: [orig2vdoc(document.uri, injection.langFileExt)],
+        })
+      );
     }
     return codeLenses;
   }
@@ -101,7 +109,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
     document: vscode.TextDocument,
     position: vscode.Position,
     token: vscode.CancellationToken,
-    context: vscode.CompletionContext,
+    context: vscode.CompletionContext
   ) {
     const att = fs.files.get(canonOrigUri(document.uri));
     const injection = getInjectionAtPosition(
@@ -126,6 +134,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
 
         // call language server
         const doc = document.getText();
+        const docName = `file://${vdoc2orig(document.uri)}.${extension}`;
         const muxResult = await mutex.runExclusive(async () => {
           if (!documentInitialized.get(document.uri.toString())) {
             console.log("Sending textDocument/didOpen");
@@ -133,7 +142,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
             lastDocumentVersion.set(document.uri.toString(), 0);
             endpoint.notify("textDocument/didOpen", {
               textDocument: {
-                uri: `${vdoc2orig(document.uri)}.${extension}`,
+                uri: docName,
                 languageId: document.languageId,
                 version: document.version,
                 text: doc,
@@ -146,7 +155,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
             );
             endpoint.notify("textDocument/didChange", {
               textDocument: {
-                uri: `${vdoc2orig(document.uri)}.${extension}`,
+                uri: docName,
                 version: lastDocumentVersion.get(document.uri.toString()),
               },
               contentChanges: [
@@ -155,11 +164,10 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
                     start: { line: 0, character: 0 },
                     end: {
                       line:
-                        lastDocumentLength.get(document.uri.toString())
-                          .line - 1,
-                      character: lastDocumentLength.get(
-                        document.uri.toString()
-                      ).character,
+                        lastDocumentLength.get(document.uri.toString()).line -
+                        1,
+                      character: lastDocumentLength.get(document.uri.toString())
+                        .character,
                     },
                   },
                   text: doc,
@@ -182,15 +190,12 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
           const completionResult: { items: vscode.CompletionItem[] } =
             await endpoint.send("textDocument/completion", {
               textDocument: {
-                uri: `${vdoc2orig(document.uri)}.${extension}`,
+                uri: docName,
               },
               position: position,
               context: context,
             });
-          console.log(
-            "Language server completion result",
-            completionResult
-          );
+          console.log("Language server completion result", completionResult);
           return completionResult;
         });
 
@@ -250,8 +255,8 @@ function initPyright() {
 
 function initClangd() {
   const serverProcess = spawn(
-    //"/home/eliot/Documents/GitHub/lahacks2025/clangd.sh",
-    "/usr/bin/clangd",
+    "/home/eliot/Documents/GitHub/lahacks2025/clangd.sh",
+    //"/usr/bin/clangd",
     ["--limit-results=20"]
   );
   console.log("starting clangd");
@@ -291,25 +296,30 @@ export function activate(context: ExtensionContext) {
   // ========== Language server ==========
   fs = new FragmentsFS();
   context.subscriptions.push(
-    workspace.registerFileSystemProvider(
-      FS_SCHEME, fs,
-      { isCaseSensitive: true }
-    )
+    workspace.registerFileSystemProvider(FS_SCHEME, fs, {
+      isCaseSensitive: true,
+    })
   );
 
-  workspace.onDidOpenTextDocument(document => fs.updateDocument(document));
-  workspace.onDidChangeTextDocument(e => fs.updateDocument(e.document, e.contentChanges));
+  workspace.onDidOpenTextDocument((document) => fs.updateDocument(document));
+  workspace.onDidChangeTextDocument((e) =>
+    fs.updateDocument(e.document, e.contentChanges)
+  );
 
   workspace.onDidCloseTextDocument((e) => {
     fs.removeDocument(e.uri);
   });
-  
+
   // TODO(rtk0c): this is a pretty good default for most languages, but e.g. haskell or lisp won't like this
-  const triggerCharacters = charsBetween('a', 'z')
-    .concat(charsBetween('A', 'Z'))
+  const triggerCharacters = charsBetween("a", "z")
+    .concat(charsBetween("A", "Z"))
     .concat(["."]);
   context.subscriptions.push(
-    languages.registerCompletionItemProvider("*", new InjectionCodeCompleteProvider(), ...triggerCharacters)
+    languages.registerCompletionItemProvider(
+      "*",
+      new InjectionCodeCompleteProvider(),
+      ...triggerCharacters
+    )
   );
 
   context.subscriptions.push(
@@ -431,15 +441,10 @@ export function activate(context: ExtensionContext) {
   // Listen for saves
   context.subscriptions.push(
     workspace.onDidSaveTextDocument(async (e) => {
-      if (e.uri.scheme != "embedded-content") {
+      if (e.uri.scheme != FS_SCHEME) {
         await makeAIPoweredDiagnostics(e);
       }
     })
-  );
-
-  // Listen for file opens
-  context.subscriptions.push(
-    workspace.onDidOpenTextDocument(makeAIPoweredDiagnostics)
   );
 
   // handle documents already open when extension activates
@@ -450,7 +455,7 @@ export function activate(context: ExtensionContext) {
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) { }
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
