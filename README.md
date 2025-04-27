@@ -19,7 +19,7 @@ This extension has the potential to significantly impact the software developmen
 
 ## How it's Better
 
-Existing solutions often require developers to switch between different tools and platforms. This extension allows developers to seamlessly write multiple differnet languages in one file for a more streamlined and efficient workflow. Furthermore, it closely integrates Gemini AI into the VS Code environment for AI powered linting and diagnostics. Unlike solutions like Cursor, our extension proactively looks for optmizations in your code, in turn creating linting errors if any are found. Also, This extension is designed to be lightweight and performant, ensuring that it doesn't slow down your development process.
+Existing solutions often require developers to switch between different tools and platforms. This extension allows developers to seamlessly write multiple different languages in one file for a more streamlined and efficient workflow. Furthermore, it closely integrates Gemini AI into the VS Code environment for AI powered linting and diagnostics. Unlike solutions like Cursor, our extension proactively looks for optmizations in your code, in turn creating linting errors if any are found. Also, This extension is designed to be lightweight and performant, ensuring that it doesn't slow down your development process.
 
 ## Running the Project
 
