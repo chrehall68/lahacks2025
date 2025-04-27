@@ -458,7 +458,7 @@ export function activate(context: ExtensionContext) {
 
         const htmlExplanation = converter.makeHtml(explanation);
         // set contents
-        quickfixProvider.currentWebview.html = `
+        quickfixProvider.currentWebview.html = /*@LANGUAGE:html@*/ `
   <div>
     <div id="renderedExplanation">${htmlExplanation}</div> 
     <p id="explanationText" style="display: none;">${explanation}</p>
