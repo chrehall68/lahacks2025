@@ -29,8 +29,8 @@ import {
   Fragment,
   FragmentsFS,
   FS_SCHEME,
+  LangId,
   orig2vdoc,
-  Region,
   vdoc2orig,
 } from "./injectedDocs";
 
@@ -107,9 +107,15 @@ class InjectionCodeLensProvider implements CodeLensProvider {
   }
 }
 
-function translate(doc: TextDocument, vdoc: string, range: Range, origin: number): Range {
+function translate(
+  doc: TextDocument,
+  vdoc: string,
+  range: Range,
+  origin: number
+): Range {
   const pos = range.start;
-  let l = 0, c = 0;
+  let l = 0,
+    c = 0;
   let off = 0;
   for (; l !== pos.line || c !== pos.character; off++) {
     if (vdoc[off] === "\n") {
@@ -122,15 +128,30 @@ function translate(doc: TextDocument, vdoc: string, range: Range, origin: number
 
   const { line, character } = doc.positionAt(origin + off);
   return new Range(
-    line, character,
-    line, character + range.end.character - range.start.character,
+    line,
+    character,
+    line,
+    character + range.end.character - range.start.character
   );
 }
 
-function translateCompletionResults(doc: TextDocument, vdoc: string, res: vscode.CompletionList, off: number): vscode.CompletionList {
+function translateCompletionResults(
+  doc: TextDocument,
+  vdoc: string,
+  res: vscode.CompletionList,
+  off: number
+): vscode.CompletionList {
   console.log(res);
   for (const item of res.items) {
+    // certain LSPs still use this
+    if (item.textEdit) {
+      item.textEdit.range = translate(doc, vdoc, item.textEdit.range, off);
+    }
+    // primary API
     const r = item.range;
+    if (!r) {
+      continue;
+    }
     if (r instanceof Range) {
       item.range = translate(doc, vdoc, r, off);
     } else {
@@ -162,7 +183,12 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
 
     // shift backwards to the start of the virtual document
     console.log("pre pos: ", position);
-    const fragmentText = document.getText(new Range(document.positionAt(fragment.start), document.positionAt(fragment.end)));
+    const fragmentText = document.getText(
+      new Range(
+        document.positionAt(fragment.start),
+        document.positionAt(fragment.end)
+      )
+    );
     const p = document.offsetAt(position) - fragment.start;
     // Go p characters forward from fragmentText, calc line&column
     let line = 0;
@@ -180,101 +206,95 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
     console.log("post pos: ", position);
 
     // If not in an injection fragment, forward the request to primary LS directly
-    if (!fragment) {
-      if (document.uri.scheme === FS_SCHEME) {
-        let endpoint: JSONRPCEndpoint;
-        let extension: string;
-        if (document.languageId === "python") {
-          endpoint = pyrightEndpoint;
-          extension = "py";
-        } else if (document.languageId === "cpp") {
-          endpoint = clangdEndpoint;
-          extension = "cpp";
-        } else {
-          return null;
-        }
-
-        // call language server
-        const doc = document.getText();
-        const docName = `file://${vdoc2orig(document.uri)}${idx}.${extension}`;
-        const muxResult = await mutex.runExclusive(async () => {
-          if (!documentInitialized.get(document.uri.toString())) {
-            console.log("Sending textDocument/didOpen");
-            documentInitialized.set(document.uri.toString(), true);
-            lastDocumentVersion.set(document.uri.toString(), 0);
-            endpoint.notify("textDocument/didOpen", {
-              textDocument: {
-                uri: docName,
-                languageId: document.languageId,
-                version: document.version,
-                text: doc,
-              },
-            });
-          } else {
-            console.log(
-              "Sending didChange with version",
-              lastDocumentVersion.get(document.uri.toString())
-            );
-            endpoint.notify("textDocument/didChange", {
-              textDocument: {
-                uri: docName,
-                version: lastDocumentVersion.get(document.uri.toString()),
-              },
-              contentChanges: [
-                {
-                  range: {
-                    start: { line: 0, character: 0 },
-                    end: {
-                      line:
-                        lastDocumentLength.get(document.uri.toString()).line -
-                        1,
-                      character: lastDocumentLength.get(document.uri.toString())
-                        .character,
-                    },
-                  },
-                  text: doc,
-                },
-              ],
-            });
-            lastDocumentVersion.set(
-              document.uri.toString(),
-              lastDocumentVersion.get(document.uri.toString()) + 1
-            );
-            await new Promise((resolve) => setTimeout(resolve, 100));
-          }
-          const lines = doc.split("\n");
-          lastDocumentLength.set(document.uri.toString(), {
-            line: lines.length,
-            character: lines[lines.length - 1].length,
-          });
-          console.log("Sent textDocument/didOpen and didChange");
-          console.log("Trying to get language server response");
-          const completionResult: { items: vscode.CompletionItem[] } =
-            await endpoint.send("textDocument/completion", {
-              textDocument: {
-                uri: docName,
-              },
-              position: position,
-              context: context,
-            });
-          console.log("Language server completion result", completionResult);
-          return completionResult;
-        });
-
-        if (muxResult) {
-          const results: vscode.CompletionItem[] = [];
-          for (const item of muxResult.items) {
-            const it = new vscode.CompletionItem(item.label);
-            it.kind = item.kind;
-            it.sortText = item.sortText;
-            it.detail = item.detail;
-            results.push(it);
-          }
-          return translateCompletionResults(document, fragmentText, muxResult, fragment.start);
-        }
+    if (fragment) {
+      let endpoint: JSONRPCEndpoint;
+      let languageId: LangId;
+      if (fragment.langFileExt === "py") {
+        endpoint = pyrightEndpoint;
+        languageId = "python";
+      } else if (fragment.langFileExt === "cpp") {
+        endpoint = clangdEndpoint;
+        languageId = "cpp";
+      } else {
+        return null;
       }
 
-      return null;
+      // call language server
+      const fragmentName = orig2vdoc(document.uri, idx, fragment.langFileExt);
+      const docName = `file://${vdoc2orig(fragmentName)}${idx}.${
+        fragment.langFileExt
+      }`;
+      const muxResult = await mutex.runExclusive(async () => {
+        if (!documentInitialized.get(fragmentName.toString())) {
+          console.log("Sending textDocument/didOpen");
+          documentInitialized.set(fragmentName.toString(), true);
+          lastDocumentVersion.set(fragmentName.toString(), 0);
+          endpoint.notify("textDocument/didOpen", {
+            textDocument: {
+              uri: docName,
+              languageId: languageId,
+              version: document.version,
+              text: fragmentText,
+            },
+          });
+        } else {
+          console.log(
+            "Sending didChange with version",
+            lastDocumentVersion.get(fragmentName.toString())
+          );
+          endpoint.notify("textDocument/didChange", {
+            textDocument: {
+              uri: docName,
+              version: lastDocumentVersion.get(fragmentName.toString()),
+            },
+            contentChanges: [
+              {
+                range: {
+                  start: { line: 0, character: 0 },
+                  end: {
+                    line:
+                      lastDocumentLength.get(fragmentName.toString()).line - 1,
+                    character: lastDocumentLength.get(fragmentName.toString())
+                      .character,
+                  },
+                },
+                text: fragmentText,
+              },
+            ],
+          });
+          lastDocumentVersion.set(
+            fragmentName.toString(),
+            lastDocumentVersion.get(fragmentName.toString()) + 1
+          );
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const lines = fragmentText.split("\n");
+        lastDocumentLength.set(fragmentName.toString(), {
+          line: lines.length,
+          character: lines[lines.length - 1].length,
+        });
+        console.log("Sent textDocument/didOpen and didChange");
+        console.log("Trying to get language server response");
+        const completionResult: { items: vscode.CompletionItem[] } =
+          await endpoint.send("textDocument/completion", {
+            textDocument: {
+              uri: docName,
+            },
+            position: position,
+            context: context,
+          });
+        console.log("Language server completion result", completionResult);
+        return completionResult;
+      });
+
+      if (muxResult) {
+        return translateCompletionResults(
+          document,
+          fragmentText,
+          muxResult,
+          fragment.start
+        );
+      }
     }
 
     // Otherwise, forward to minion LS
@@ -284,7 +304,12 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
       position,
       context.triggerCharacter
     );
-    return translateCompletionResults(document, fragmentText, res, fragment.start);
+    return translateCompletionResults(
+      document,
+      fragmentText,
+      res,
+      fragment.start
+    );
   }
 }
 
@@ -318,8 +343,8 @@ function initPyright() {
 
 function initClangd() {
   const serverProcess = spawn(
-    "/home/eliot/Documents/GitHub/lahacks2025/clangd.sh",
-    //"/usr/bin/clangd",
+    "/usr/bin/clangd",
+    //"/home/eliot/Documents/GitHub/lahacks2025/clangd.sh",
     ["--limit-results=20"]
   );
   console.log("starting clangd");
@@ -396,7 +421,7 @@ export function activate(context: ExtensionContext) {
   );
 
   // ========== AI Linting ==========
-  /*
+
   // FIXME(rtk0c): don't read env var in prod, here in dev it's easier than changing a json config file in the slave vscode
   const geminiApiKey: string =
     workspace.getConfiguration().get("lahacks2025.geminiApiKey") ||
@@ -516,11 +541,10 @@ export function activate(context: ExtensionContext) {
   if (activeDocument) {
     makeAIPoweredDiagnostics(activeDocument);
   }
-  */
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) { }
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
