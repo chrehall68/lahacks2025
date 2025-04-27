@@ -107,41 +107,42 @@ class InjectionCodeLensProvider implements CodeLensProvider {
   }
 }
 
-function translate(doc: TextDocument, pos: vscode.Position, off: number): vscode.Position {
-  // return doc.positionAt(doc.offsetAt(pos) + off);
-  if (off < 0) {
-    off = -off;
+function translate(doc: TextDocument, vdoc: string, range: Range, origin: number): Range {
+  const pos = range.start;
+  let l = 0, c = 0;
+  let off = 0;
+  for (; l !== pos.line || c !== pos.character; off++) {
+    if (vdoc[off] === "\n") {
+      l++;
+      c = 0;
+    } else {
+      c++;
+    }
   }
-  let { line, character } = doc.positionAt(off);
-  if (off < 0) {
-    line = -line;
-    character = -character;
-  }
-  return pos.translate(line, character);
+
+  const { line, character } = doc.positionAt(origin + off);
+  return new Range(
+    line, character,
+    line, character + range.end.character - range.start.character,
+  );
 }
 
-function translateCompletionResults(document: TextDocument, res: vscode.CompletionList, off: number): vscode.CompletionList {
+function translateCompletionResults(doc: TextDocument, vdoc: string, res: vscode.CompletionList, off: number): vscode.CompletionList {
+  console.log(res);
   for (const item of res.items) {
     const r = item.range;
     if (r instanceof Range) {
-      item.range = new Range(
-        translate(document, r.start, off),
-        translate(document, r.end, off)
-      );
+      item.range = translate(doc, vdoc, r, off);
     } else {
       // {inserting, replacing} struct
       item.range = {
-        inserting: new Range(
-          translate(document, r.inserting.start, off),
-          translate(document, r.inserting.end, off),
-        ),
-        replacing: new Range(
-          translate(document, r.replacing.start, off),
-          translate(document, r.replacing.end, off),
-        )
+        inserting: translate(doc, vdoc, r.inserting, off),
+        replacing: translate(doc, vdoc, r.replacing, off),
       };
     }
   }
+  console.log(res);
+  return res;
 }
 
 class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
@@ -157,8 +158,26 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
       document.offsetAt(position)
     );
 
+    console.log(idx, fragment.langFileExt);
+
     // shift backwards to the start of the virtual document
-    position = translate(document, position, -fragment.start);
+    console.log("pre pos: ", position);
+    const fragmentText = document.getText(new Range(document.positionAt(fragment.start), document.positionAt(fragment.end)));
+    const p = document.offsetAt(position) - fragment.start;
+    // Go p characters forward from fragmentText, calc line&column
+    let line = 0;
+    let column = 0;
+    for (let i = 0; i < p; i++) {
+      if (fragmentText[i] === "\n") {
+        line++;
+        column = 0;
+      } else {
+        column++;
+      }
+    }
+    position = new vscode.Position(line, column);
+
+    console.log("post pos: ", position);
 
     // If not in an injection fragment, forward the request to primary LS directly
     if (!fragment) {
@@ -251,7 +270,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
             it.detail = item.detail;
             results.push(it);
           }
-          return translateCompletionResults(document, muxResult, fragment.start);
+          return translateCompletionResults(document, fragmentText, muxResult, fragment.start);
         }
       }
 
@@ -265,7 +284,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
       position,
       context.triggerCharacter
     );
-    return translateCompletionResults(document, res, fragment.start);
+    return translateCompletionResults(document, fragmentText, res, fragment.start);
   }
 }
 
@@ -377,6 +396,7 @@ export function activate(context: ExtensionContext) {
   );
 
   // ========== AI Linting ==========
+  /*
   // FIXME(rtk0c): don't read env var in prod, here in dev it's easier than changing a json config file in the slave vscode
   const geminiApiKey: string =
     workspace.getConfiguration().get("lahacks2025.geminiApiKey") ||
@@ -496,6 +516,7 @@ export function activate(context: ExtensionContext) {
   if (activeDocument) {
     makeAIPoweredDiagnostics(activeDocument);
   }
+  */
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {

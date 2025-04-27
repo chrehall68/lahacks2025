@@ -88,6 +88,7 @@ export function parseMarkdownInjections(doc: string): Fragment[] {
 
 class TextDocumentAttachments {
   fragments: Fragment[] = [];
+  document: vscode.TextDocument;
 }
 
 export class Fragment implements vscode.FileStat {
@@ -175,6 +176,7 @@ export class FragmentsFS implements vscode.FileSystemProvider {
     }
 
     const att = this._getOrMakeAtt(primary);
+    att.document = document;
 
     // reparse 
     if (document.languageId == "markdown") {
@@ -241,13 +243,27 @@ export class FragmentsFS implements vscode.FileSystemProvider {
   }
 
   writeFile(uri: Uri, content: Uint8Array, options: { create: boolean, overwrite: boolean }): void {
-    const fragment = this._lookup(uri);
+    const [att, fragment] = this._lookup0(uri);
     if (!fragment) {
       throw vscode.FileSystemError.FileNotFound(uri);
     }
     // TODO options
     fragment.fileContent = content;
     fragment.mtime = Date.now();
+    
+    const doc = att.document;
+    // Replace `doc` content between offset `fragment.start` and `fragment.end` with `content`
+    const offset = fragment.start;
+    const length = fragment.end - fragment.start;
+    
+    const edit = new vscode.TextEdit(
+      new vscode.Range(doc.positionAt(offset), doc.positionAt(offset + length)),
+      content.toString(),
+    );
+
+    const we = new vscode.WorkspaceEdit();
+    we.set(doc.uri, [edit]);
+    vscode.workspace.applyEdit(we);
   }
 
   watch(uri: Uri, options: { readonly recursive: boolean; readonly excludes: readonly string[]; }): vscode.Disposable {
@@ -269,10 +285,16 @@ export class FragmentsFS implements vscode.FileSystemProvider {
   }
 
   _lookup(uri: Uri): Fragment | undefined {
+    const [_, frag] = this._lookup0(uri);
+    return frag;
+  }
+
+  _lookup0(uri: Uri): [TextDocumentAttachments, Fragment?] {
     let key = vdoc2orig(uri);
     key = key.toLowerCase(); // DEFENSIVE
+    const att = this.files.get(key);
     const idx = vdocGetIndex(uri);
-    return this.files.get(key)?.fragments[idx];
+    return [att, att?.fragments[idx]];
   }
 
   _getOrMakeAtt(primary: Uri) {
