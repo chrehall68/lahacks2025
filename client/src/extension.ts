@@ -206,7 +206,10 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
     console.log("post pos: ", position);
 
     // If not in an injection fragment, forward the request to primary LS directly
-    if (fragment) {
+    if (
+      fragment &&
+      (fragment.langFileExt === "py" || fragment.langFileExt === "cpp")
+    ) {
       let endpoint: JSONRPCEndpoint;
       let languageId: LangId;
       if (fragment.langFileExt === "py") {
@@ -215,8 +218,6 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
       } else if (fragment.langFileExt === "cpp") {
         endpoint = clangdEndpoint;
         languageId = "cpp";
-      } else {
-        return null;
       }
 
       // call language server
