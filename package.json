@@ -1,14 +1,14 @@
 {
-  "name": "lsp-embedded-language-service-sample",
-  "description": "A language server example using language services to support embedded languages",
-  "author": "Microsoft Corporation",
+  "name": "lahacks-2025",
+  "description": "Language Injection and LLM-based Linting",
+  "author": "Assorted Students at SJSU",
   "license": "MIT",
   "version": "1.0.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Microsoft/vscode-extension-samples"
+    "url": "https://github.com/chrehall68/lahacks2025"
   },
-  "publisher": "vscode-samples",
+  "publisher": "chrehall68",
   "categories": [],
   "keywords": [],
   "engines": {
@@ -110,7 +110,7 @@
     "compile": "tsc -b",
     "watch": "tsc -b -w",
     "lint": "eslint",
-    "postinstall": "cd client && $npm_execpath install && cd ../server && $npm_execpath install"
+    "postinstall": "cd client && $npm_execpath install"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",

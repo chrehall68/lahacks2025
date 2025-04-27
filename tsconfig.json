@@ -5,7 +5,8 @@
 		"lib": ["es2020"],
 		"outDir": "out",
 		"rootDir": "src",
-		"sourceMap": true
+		"sourceMap": true,
+		"strict": false,
 	},
 	"include": [
 		"src"
@@ -16,6 +17,5 @@
 	],
 	"references": [
 		{ "path": "./client" },
-		{ "path": "./server" },
 	]
 }
