@@ -1,5 +1,5 @@
-import * as vscode from 'vscode';
-import { Uri } from 'vscode';
+import * as vscode from "vscode";
+import { Uri } from "vscode";
 
 export const FS_SCHEME = "fragments";
 
@@ -11,18 +11,18 @@ export type LangFileExtension = "js" | "ts" | "py" | "cpp" | "sql";
 export type LangId = "javascript" | "typescript" | "python" | "cpp" | "sql";
 
 interface FragmentDelims {
-  sbeg: RegExp,
-  send: RegExp,
+  sbeg: RegExp;
+  send: RegExp;
 }
 
 // HERE BE DRAGON: RegExp.lastIndex is the only state of the matching machinery, and since this is single-threaded, we don't care about sharing RegExp objects
 export const fragdelimsFor: Record<LangId, FragmentDelims> = {
-  'cpp': { sbeg: /R"""\(/g, send: /\)"""/g },
-  'python': { sbeg: /"""/g, send: /"""/g },
+  cpp: { sbeg: /R"""\(/g, send: /\)"""/g },
+  python: { sbeg: /"""/g, send: /"""/g },
   // HERE BE DRAGON: just ignore escaped \` for this demo...
-  'javascript': { sbeg: /`/g, send: /`/g },
-  'typescript': { sbeg: /`/g, send: /`/g },
-  'sql': undefined,
+  javascript: { sbeg: /`/g, send: /`/g },
+  typescript: { sbeg: /`/g, send: /`/g },
+  sql: undefined,
 };
 
 // TODO support only parse for begin delimiter on the next line, to prevent misuses
@@ -46,13 +46,16 @@ export function parseInjections(doc: string, rx: FragmentDelims): Fragment[] {
 
     const begin = sbeg.index + sbeg[0].length;
     const end = send.index;
-    frags.push(new Fragment(
-      match[1] as LangFileExtension,
-      begin, end,
-      now,
-      now,
-      Buffer.from(doc.substring(begin, end)),
-    ));
+    frags.push(
+      new Fragment(
+        match[1] as LangFileExtension,
+        begin,
+        end,
+        now,
+        now,
+        Buffer.from(doc.substring(begin, end))
+      )
+    );
     // Look for injection annotation after this snippet
     rxInjectionTag.lastIndex = send.index;
   }
@@ -75,13 +78,16 @@ export function parseMarkdownInjections(doc: string): Fragment[] {
 
     const begin = match.index + match[0].length;
     const end = injectionEnd.index;
-    frags.push(new Fragment(
-      match[1] as LangFileExtension,
-      begin, end,
-      now,
-      now,
-      Buffer.from(doc.substring(begin, end)),
-    ));
+    frags.push(
+      new Fragment(
+        match[1] as LangFileExtension,
+        begin,
+        end,
+        now,
+        now,
+        Buffer.from(doc.substring(begin, end))
+      )
+    );
   }
   return frags;
 }
@@ -92,7 +98,9 @@ class TextDocumentAttachments {
 }
 
 export class Fragment implements vscode.FileStat {
-  get type() { return vscode.FileType.File; }
+  get type() {
+    return vscode.FileType.File;
+  }
 
   ctime: number;
   mtime: number;
@@ -117,7 +125,9 @@ export class Fragment implements vscode.FileStat {
     this.fileContent = fileContent;
   }
 
-  get size() { return this.fileContent.byteLength; }
+  get size() {
+    return this.fileContent.byteLength;
+  }
 }
 
 export function vdoc2orig(uri: Uri): string {
@@ -142,7 +152,11 @@ export function vdocGetIndex(uri: Uri): number {
   return parseInt(numPart);
 }
 
-export function orig2vdoc(uri: Uri, index: number, langExt: LangFileExtension): Uri {
+export function orig2vdoc(
+  uri: Uri,
+  index: number,
+  langExt: LangFileExtension
+): Uri {
   const originalUri = encodeURIComponent(canonOrigUri(uri));
   const vdocUriString = `${FS_SCHEME}://${originalUri}/frag${index}.${langExt}`;
   return Uri.parse(vdocUriString);
@@ -163,9 +177,10 @@ export class FragmentsFS implements vscode.FileSystemProvider {
   onDidChangeFileEmitter = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
   onDidChangeFile = this.onDidChangeFileEmitter.event;
 
-  updateDocument(document: vscode.TextDocument, delta?: readonly vscode.TextDocumentContentChangeEvent[]) {
-    const primary = document.uri;
-
+  updateDocument(
+    document: vscode.TextDocument,
+    delta?: readonly vscode.TextDocumentContentChangeEvent[]
+  ) {
     // apply changes in order, as said by docs
     let docText = document.getText();
     for (const change of delta || []) {
@@ -175,14 +190,24 @@ export class FragmentsFS implements vscode.FileSystemProvider {
         docText.slice(change.rangeOffset + change.rangeLength);
     }
 
-    const att = this._getOrMakeAtt(primary);
+    const att = this._getOrMakeAtt(document.uri);
     att.document = document;
 
-    // reparse 
+    this._onUpdate(att.document, att, docText);
+  }
+  _onUpdate(
+    document: vscode.TextDocument,
+    att: TextDocumentAttachments,
+    docText: string
+  ) {
+    // reparse
     if (document.languageId == "markdown") {
       att.fragments = parseMarkdownInjections(docText);
     } else {
-      att.fragments = parseInjections(docText, fragdelimsFor[document.languageId]);
+      att.fragments = parseInjections(
+        docText,
+        fragdelimsFor[document.languageId]
+      );
     }
 
     // emit event
@@ -191,7 +216,7 @@ export class FragmentsFS implements vscode.FileSystemProvider {
     for (const frag of att.fragments) {
       events.push({
         type: vscode.FileChangeType.Changed,
-        uri: orig2vdoc(primary, idx, frag.langFileExt),
+        uri: orig2vdoc(document.uri, idx, frag.langFileExt),
       });
       idx++;
     }
@@ -242,7 +267,11 @@ export class FragmentsFS implements vscode.FileSystemProvider {
     }
   }
 
-  writeFile(uri: Uri, content: Uint8Array, options: { create: boolean, overwrite: boolean }): void {
+  async writeFile(
+    uri: Uri,
+    content: Uint8Array,
+    options: { create: boolean; overwrite: boolean }
+  ): Promise<void> {
     const [att, fragment] = this._lookup0(uri);
     if (!fragment) {
       throw vscode.FileSystemError.FileNotFound(uri);
@@ -250,24 +279,33 @@ export class FragmentsFS implements vscode.FileSystemProvider {
     // TODO options
     fragment.fileContent = content;
     fragment.mtime = Date.now();
-    
+
     const doc = att.document;
     // Replace `doc` content between offset `fragment.start` and `fragment.end` with `content`
     const offset = fragment.start;
-    const length = fragment.end - fragment.start;
-    
+    const length = Math.max(fragment.end - 1 - fragment.start, 0); // -1 because end is actually index of )
+
+    // send update
     const edit = new vscode.TextEdit(
       new vscode.Range(doc.positionAt(offset), doc.positionAt(offset + length)),
-      content.toString(),
+      content.toString()
     );
-
     const we = new vscode.WorkspaceEdit();
     we.set(doc.uri, [edit]);
-    vscode.workspace.applyEdit(we);
+    await vscode.workspace.applyEdit(we);
+
+    // update
+    this._onUpdate(doc, att, doc.getText());
   }
 
-  watch(uri: Uri, options: { readonly recursive: boolean; readonly excludes: readonly string[]; }): vscode.Disposable {
-    throw new Error('Method not implemented.');
+  watch(
+    uri: Uri,
+    options: {
+      readonly recursive: boolean;
+      readonly excludes: readonly string[];
+    }
+  ): vscode.Disposable {
+    throw new Error("Method not implemented.");
   }
 
   // --- manage files/folders
