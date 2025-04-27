@@ -31,6 +31,7 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient";
+import { canonOrigUri, orig2vdoc, FragmentsFS, Region, FS_SCHEME, vdoc2orig } from './injectedDocs';
 
 function LOGHERE(...args) {
   console.log("[LAHACKS]", ...args);
@@ -45,9 +46,6 @@ const lastDocumentLength = new Map<
   string,
   { line: number; character: number }
 >();
-const documentAttachments = new Map<Uri, TextDocumentAttachments>();
-const virtualDocumentContents = new Map<string, string>();
-const documentToVirtual = new Map<string, string[]>();
 const converter = new showdown.Converter();
 let lastFixContext: string;
 let fixes: CodeAction[];
@@ -57,124 +55,11 @@ let AIPoweredDiagnostics: vscode.DiagnosticCollection;
 let pyrightEndpoint: JSONRPCEndpoint;
 let clangdEndpoint: JSONRPCEndpoint;
 let mutex = new Mutex();
+let fs: FragmentsFS;
 
 // ==============================
 //  Language server code
 // ==============================
-interface TextDocumentAttachments {
-  injections?: Region[];
-  lang2vdoc?: Record<string, Uri>;
-}
-
-function canonUri(uri: Uri): string {
-  const preStrip = uri.path.slice(1);
-  const postStrip = preStrip.slice(0, preStrip.lastIndexOf("."));
-  return decodeURIComponent(postStrip);
-}
-
-function withExtensionUri(uri: Uri): string {
-  const preStrip = uri.path.slice(1);
-  return decodeURIComponent(preStrip);
-}
-
-// js, py, cpp, etc.
-// The thing that is put into @LANGUAGE:__@ and into vdoc Uri
-type LangFileExtension = string;
-// javascript, python, cpp, etc.
-// The thing extensions & syntaxes registers to provide
-type LangId = string;
-
-interface Region {
-  langFileExt: LangFileExtension;
-  start: number;
-  end: number;
-}
-
-function filterDocContent(doc: string, regions: Iterable<Region>): string {
-  let content = doc.replace(/[^\n]/g, " ");
-  for (const r of regions) {
-    content =
-      content.slice(0, r.start) +
-      doc.slice(r.start, r.end) +
-      content.slice(r.end);
-  }
-  return content;
-}
-
-interface FragmentDelims {
-  sbeg: RegExp;
-  send: RegExp;
-}
-
-// HERE BE DRAGON: RegExp.lastIndex is the only state of the matching machinery, and since this is single-threaded, we don't care about sharing RegExp objects
-const fragdelimsFor: Record<LangId, FragmentDelims> = {
-  cpp: { sbeg: /R"""\(/g, send: /\)"""/g },
-  python: { sbeg: /"""/g, send: /"""/g },
-  // HERE BE DRAGON: just ignore escaped \` for this demo...
-  javascript: { sbeg: /`/g, send: /`/g },
-  typescript: { sbeg: /`/g, send: /`/g },
-};
-
-// TODO support only parse for begin delimiter on the next line, to prevent misuses
-function parseInjections(doc: string, rx: FragmentDelims): Region[] {
-  const rxInjectionTag = /@LANGUAGE:([^@]*)@/g;
-  let match: RegExpExecArray;
-  const regions: Region[] = [];
-  while ((match = rxInjectionTag.exec(doc)) !== null) {
-    rx.sbeg.lastIndex = match.index + match[0].length;
-    const sbeg = rx.sbeg.exec(doc);
-    if (!sbeg) {
-      break;
-    }
-
-    rx.send.lastIndex = sbeg.index + sbeg[0].length;
-    const send = rx.send.exec(doc);
-    if (!send) {
-      break;
-    }
-
-    regions.push({
-      langFileExt: match[1],
-      start: sbeg.index + sbeg[0].length,
-      end: send.index,
-    });
-    // Look for injection annotation after this snippet
-    rxInjectionTag.lastIndex = send.index;
-  }
-  return regions;
-}
-
-function parseMarkdownInjections(doc: string): Region[] {
-  const rxInjectionBeg = /```([^\n]+)\n/g;
-  let match: RegExpExecArray;
-  const regions: Region[] = [];
-  while ((match = rxInjectionBeg.exec(doc)) !== null) {
-    // FIXME(rtk0c): markdown probably has a way to escape ``` inside a codeblock
-    const rxInjectionEnd = /```/g;
-    rxInjectionEnd.lastIndex = match.index + match[0].length;
-    const end = rxInjectionEnd.exec(doc);
-    if (!end) {
-      break;
-    }
-
-    regions.push({
-      langFileExt: match[1],
-      start: match.index + match[0].length,
-      end: end.index,
-    });
-  }
-  return regions;
-}
-
-function getAttachments(uri: Uri): TextDocumentAttachments {
-  let res = documentAttachments.get(uri);
-  if (res) {
-    return res;
-  }
-  res = {};
-  documentAttachments.set(uri, res);
-  return res;
-}
 
 function getInjectionAtPosition(
   regions: Region[],
@@ -195,25 +80,17 @@ function getInjectionAtPosition(
 class InjectionCodeLensProvider implements CodeLensProvider {
   onDidChangeCodeLenses?: vscode.Event<void>;
 
-  provideCodeLenses(
-    document: TextDocument,
-    token: CancellationToken
-  ): vscode.ProviderResult<vscode.CodeLens[]> {
-    const att = getAttachments(document.uri);
+  provideCodeLenses(document: TextDocument, token: CancellationToken): vscode.ProviderResult<vscode.CodeLens[]> {
+    const att = fs.files.get(canonOrigUri(document.uri));
     const codeLenses = [];
-    for (const injection of att.injections) {
-      const range = new Range(
-        document.positionAt(injection.start),
-        document.positionAt(injection.end)
-      );
-      codeLenses.push(
-        new CodeLens(range, {
-          title: "New Tab",
-          tooltip: "Open injected fragment in a new buffer",
-          command: "lahacks2025.openFragment",
-          arguments: [att.lang2vdoc[injection.langFileExt]],
-        })
-      );
+    for (const injection of att.injections.values()) {
+      const range = new Range(document.positionAt(injection.start), document.positionAt(injection.end));
+      codeLenses.push(new CodeLens(range, {
+        title: "New Tab",
+        tooltip: "Open injected fragment in a new buffer",
+        command: "lahacks2025.openFragment",
+        arguments: [orig2vdoc(document.uri, injection.langFileExt)],
+      }));
     }
     return codeLenses;
   }
@@ -226,15 +103,15 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
     token: vscode.CancellationToken,
     context: vscode.CompletionContext,
   ) {
-    const attachments = getAttachments(document.uri);
+    const att = fs.files.get(canonOrigUri(document.uri));
     const injection = getInjectionAtPosition(
-      attachments.injections,
+      att.injections,
       document.offsetAt(position)
     );
 
     // If not in an injection fragment, forward the request to primary LS directly
     if (!injection) {
-      if (document.uri.scheme === "embedded-content") {
+      if (document.uri.scheme === FS_SCHEME) {
         let endpoint: JSONRPCEndpoint;
         let extension: string;
         if (document.languageId === "python") {
@@ -256,7 +133,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
             lastDocumentVersion.set(document.uri.toString(), 0);
             endpoint.notify("textDocument/didOpen", {
               textDocument: {
-                uri: canonUri(document.uri) + "." + extension,
+                uri: `${vdoc2orig(document.uri)}.${extension}`,
                 languageId: document.languageId,
                 version: document.version,
                 text: doc,
@@ -269,7 +146,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
             );
             endpoint.notify("textDocument/didChange", {
               textDocument: {
-                uri: canonUri(document.uri) + "." + extension,
+                uri: `${vdoc2orig(document.uri)}.${extension}`,
                 version: lastDocumentVersion.get(document.uri.toString()),
               },
               contentChanges: [
@@ -305,7 +182,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
           const completionResult: { items: vscode.CompletionItem[] } =
             await endpoint.send("textDocument/completion", {
               textDocument: {
-                uri: canonUri(document.uri) + "." + extension,
+                uri: `${vdoc2orig(document.uri)}.${extension}`,
               },
               position: position,
               context: context,
@@ -332,18 +209,10 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
       return null;
     }
 
-    // const d = await workspace.openTextDocument(
-    //   attachments.lang2v c[injection.language]
-    // );
-    // await window.showTextDocument(d, { preview: false });
-
     // Otherwise, forward to minion LS
-    const otherDoc = await workspace.openTextDocument(
-      attachments.lang2vdoc[injection.language]
-    );
     const res = await commands.executeCommand<vscode.CompletionList>(
       "vscode.executeCompletionItemProvider",
-      attachments.lang2vdoc[injection.langFileExt],
+      orig2vdoc(document.uri, injection.langFileExt),
       position,
       context.triggerCharacter
     );
@@ -420,69 +289,19 @@ export function activate(context: ExtensionContext) {
   initPyright();
   initClangd();
   // ========== Language server ==========
-  const contentProvider = new (class
-    implements vscode.TextDocumentContentProvider {
-    onDidChangeEmitter = new vscode.EventEmitter<vscode.Uri>();
-    onDidChange = this.onDidChangeEmitter.event;
-
-    provideTextDocumentContent(uri) {
-      return virtualDocumentContents.get(withExtensionUri(uri));
-    }
-  })();
-  workspace.registerTextDocumentContentProvider(
-    "embedded-content",
-    contentProvider
+  fs = new FragmentsFS();
+  context.subscriptions.push(
+    workspace.registerFileSystemProvider(
+      FS_SCHEME, fs,
+      { isCaseSensitive: true }
+    )
   );
 
-  const refreshDocument = (document: TextDocument) => {
-    const doc = document.getText();
-    const att = getAttachments(document.uri);
-
-    if (document.languageId == "markdown") {
-      att.injections = parseMarkdownInjections(doc);
-    } else {
-      att.injections = parseInjections(doc, fragdelimsFor[document.languageId]);
-    }
-
-    att.lang2vdoc = {};
-    const originalUri = encodeURIComponent(document.uri.toString(true));
-    for (const injection of att.injections) {
-      const vdocUriString = `embedded-content://${injection.langFileExt}/${originalUri}.${injection.langFileExt}`;
-      const vdocUri = Uri.parse(vdocUriString);
-      att.lang2vdoc[injection.langFileExt] = vdocUri;
-    }
-
-    // clear out anything existing
-    for (const prevVirtual of documentToVirtual.get(document.uri.toString()) ||
-      []) {
-      virtualDocumentContents.delete(prevVirtual);
-    }
-    // then set new ones
-    documentToVirtual.set(document.uri.toString(), []);
-    console.log(canonUri(Object.values(att.lang2vdoc)[0]));
-    for (const [language, vdocUri] of Object.entries(att.lang2vdoc)) {
-      virtualDocumentContents.set(
-        withExtensionUri(vdocUri),
-        filterDocContent(
-          doc,
-          att.injections.filter((x) => x.langFileExt === language)
-        )
-      );
-      documentToVirtual
-        .get(document.uri.toString())
-        ?.push(withExtensionUri(vdocUri));
-      contentProvider.onDidChangeEmitter.fire(vdocUri);
-    }
-  };
-  workspace.onDidOpenTextDocument(refreshDocument);
-  workspace.onDidChangeTextDocument((e) => refreshDocument(e.document));
+  workspace.onDidOpenTextDocument(document => fs.updateDocument(document));
+  workspace.onDidChangeTextDocument(e => fs.updateDocument(e.document, e.contentChanges));
 
   workspace.onDidCloseTextDocument((e) => {
-    documentAttachments.delete(e.uri);
-    for (const vdocUri of documentToVirtual.get(e.uri.toString())) {
-      virtualDocumentContents.delete(vdocUri);
-    }
-    documentToVirtual.delete(e.uri.toString());
+    fs.removeDocument(e.uri);
   });
   
   // TODO(rtk0c): this is a pretty good default for most languages, but e.g. haskell or lisp won't like this
@@ -619,13 +438,9 @@ export function activate(context: ExtensionContext) {
   );
 
   // Listen for file opens
-  // context.subscriptions.push(
-  //   workspace.onDidOpenTextDocument(async (e) => {
-  //     if (e.uri.scheme != "embedded-content") {
-  //       await makeAIPoweredDiagnostics(e);
-  //     }
-  //   })
-  // );
+  context.subscriptions.push(
+    workspace.onDidOpenTextDocument(makeAIPoweredDiagnostics)
+  );
 
   // handle documents already open when extension activates
   const activeDocument = window.activeTextEditor?.document;
@@ -883,12 +698,6 @@ export async function deactivate(): Promise<void> {
   return null;
 }
 
-function testParseInjections() {
-  const i = '// @LANGUAGE: sql@\nauto s = R"""(some code here)"""';
-  const pp = parseInjections(i, fragdelimsFor["cpp"]);
-  const sec = i.substring(pp[0].start, pp[0].end);
-  return sec;
-}
 const SEVERITIES = {
   1: vscode.DiagnosticSeverity.Error,
   2: vscode.DiagnosticSeverity.Warning,
