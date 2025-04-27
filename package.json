@@ -1,9 +1,9 @@
 {
-  "name": "lahacks-2025",
+  "name": "polyglot",
   "description": "Language Injection and LLM-based Linting",
-  "author": "Assorted Students at SJSU",
+  "author": "Alex, Eliot, and Tianyi",
   "license": "MIT",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/chrehall68/lahacks2025"
@@ -20,12 +20,12 @@
   ],
   "contributes": {
     "configuration": {
-      "title": "LAHACKS2025 Settings",
+      "title": "Polyglot Settings",
       "properties": {
         "polyglot.geminiApiKey": {
           "type": "string",
           "default": "",
-          "description": "Gemini API Key for LAHACKS2025 extension."
+          "description": "Gemini API Key for Polyglot extension."
         },
         "polyglot.pyright-langserver.path": {
           "type": "string",
