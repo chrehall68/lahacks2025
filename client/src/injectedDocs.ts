@@ -10,23 +10,6 @@ export type LangFileExtension = "js" | "ts" | "py" | "cpp" | "sql";
 // The thing extensions & syntaxes registers to provide
 export type LangId = "javascript" | "typescript" | "python" | "cpp" | "sql";
 
-export interface Region {
-  langFileExt: LangFileExtension;
-  start: number;
-  end: number;
-}
-
-export function filterDocContent(doc: string, regions: Iterable<Region>): string {
-  let content = doc.replace(/[^\n]/g, " ");
-  for (const r of regions) {
-    content =
-      content.slice(0, r.start) +
-      doc.slice(r.start, r.end) +
-      content.slice(r.end);
-  }
-  return content;
-}
-
 interface FragmentDelims {
   sbeg: RegExp,
   send: RegExp,
@@ -43,10 +26,11 @@ export const fragdelimsFor: Record<LangId, FragmentDelims> = {
 };
 
 // TODO support only parse for begin delimiter on the next line, to prevent misuses
-export function parseInjections(doc: string, rx: FragmentDelims): Region[] {
+export function parseInjections(doc: string, rx: FragmentDelims): Fragment[] {
   const rxInjectionTag = /@LANGUAGE:([^@]*)@/g;
   let match: RegExpExecArray;
-  const regions: Region[] = [];
+  const frags: Fragment[] = [];
+  const now = Date.now();
   while ((match = rxInjectionTag.exec(doc)) !== null) {
     rx.sbeg.lastIndex = match.index + match[0].length;
     const sbeg = rx.sbeg.exec(doc);
@@ -60,42 +44,50 @@ export function parseInjections(doc: string, rx: FragmentDelims): Region[] {
       break;
     }
 
-    regions.push({
-      langFileExt: match[1] as LangFileExtension,
-      start: sbeg.index + sbeg[0].length,
-      end: send.index,
-    });
+    const begin = sbeg.index + sbeg[0].length;
+    const end = send.index;
+    frags.push(new Fragment(
+      match[1] as LangFileExtension,
+      begin, end,
+      now,
+      now,
+      Buffer.from(doc.substring(begin, end)),
+    ));
     // Look for injection annotation after this snippet
     rxInjectionTag.lastIndex = send.index;
   }
-  return regions;
+  return frags;
 }
 
-export function parseMarkdownInjections(doc: string): Region[] {
+export function parseMarkdownInjections(doc: string): Fragment[] {
   const rxInjectionBeg = /```([^\n]+)\n/g;
   let match: RegExpExecArray;
-  const regions: Region[] = [];
+  const frags: Fragment[] = [];
+  const now = Date.now();
   while ((match = rxInjectionBeg.exec(doc)) !== null) {
     // FIXME(rtk0c): markdown probably has a way to escape ``` inside a codeblock
     const rxInjectionEnd = /```/g;
     rxInjectionEnd.lastIndex = match.index + match[0].length;
-    const end = rxInjectionEnd.exec(doc);
-    if (!end) {
+    const injectionEnd = rxInjectionEnd.exec(doc);
+    if (!injectionEnd) {
       break;
     }
 
-    regions.push({
-      langFileExt: match[1] as LangFileExtension,
-      start: match.index + match[0].length,
-      end: end.index,
-    });
+    const begin = match.index + match[0].length;
+    const end = injectionEnd.index;
+    frags.push(new Fragment(
+      match[1] as LangFileExtension,
+      begin, end,
+      now,
+      now,
+      Buffer.from(doc.substring(begin, end)),
+    ));
   }
-  return regions;
+  return frags;
 }
 
 class TextDocumentAttachments {
-  fragments = new Map<LangFileExtension, Fragment>;
-  injections: Region[] = [];
+  fragments: Fragment[] = [];
 }
 
 export class Fragment implements vscode.FileStat {
@@ -105,14 +97,20 @@ export class Fragment implements vscode.FileStat {
   mtime: number;
   langFileExt: LangFileExtension;
   fileContent: Uint8Array;
+  start: number;
+  end: number;
 
   constructor(
     langFileExt: LangFileExtension,
+    start: number,
+    end: number,
     ctime: number,
     mtime: number,
     fileContent: Uint8Array
   ) {
     this.langFileExt = langFileExt;
+    this.start = start;
+    this.end = end;
     this.ctime = ctime;
     this.mtime = mtime;
     this.fileContent = fileContent;
@@ -129,13 +127,23 @@ export function vdoc2orig(uri: Uri): string {
   return uri.authority;
 }
 
+// frag5.js
+// => js
 export function vdocGetLang(uri: Uri): string {
   return uri.path.slice(uri.path.lastIndexOf(".") + 1);
 }
 
-export function orig2vdoc(uri: Uri, langExt: LangFileExtension): Uri {
+// frag5.js
+// => 5
+export function vdocGetIndex(uri: Uri): number {
+  const filePart: string = uri.path.slice(uri.path.lastIndexOf("/") + 1);
+  const numPart = filePart.match(/^frag(\d+)/)[1];
+  return parseInt(numPart);
+}
+
+export function orig2vdoc(uri: Uri, index: number, langExt: LangFileExtension): Uri {
   const originalUri = encodeURIComponent(canonOrigUri(uri));
-  const vdocUriString = `${FS_SCHEME}://${originalUri}/frag.${langExt}`;
+  const vdocUriString = `${FS_SCHEME}://${originalUri}/frag${index}.${langExt}`;
   return Uri.parse(vdocUriString);
 }
 
@@ -170,37 +178,20 @@ export class FragmentsFS implements vscode.FileSystemProvider {
 
     // reparse 
     if (document.languageId == "markdown") {
-      att.injections = parseMarkdownInjections(docText);
+      att.fragments = parseMarkdownInjections(docText);
     } else {
-      att.injections = parseInjections(docText, fragdelimsFor[document.languageId]);
+      att.fragments = parseInjections(docText, fragdelimsFor[document.languageId]);
     }
 
-    // injections to fragments
-    const distinctLangs = new Set<LangFileExtension>();
-    for (const r of att.injections) {
-      distinctLangs.add(r.langFileExt);
-    }
-    // get rid of current list of fragments
-    att.fragments = new Map<LangFileExtension, Fragment>();
-    const now = Date.now();
+    // emit event
     const events = [];
-    for (const lang of distinctLangs) {
-      att.fragments.set(
-        lang,
-        new Fragment(
-          lang,
-          // TODO(rtk0c): diff old and new injections so emit correct mtime/ctime/file events
-          now,  // mtime
-          now,  // ctime
-          Buffer.from(filterDocContent(
-            docText,
-            att.injections.filter(x => x.langFileExt === lang)
-          ))
-        ));
+    let idx = 0;
+    for (const frag of att.fragments) {
       events.push({
         type: vscode.FileChangeType.Changed,
-        uri: orig2vdoc(primary, lang),
+        uri: orig2vdoc(primary, idx, frag.langFileExt),
       });
+      idx++;
     }
     this.onDidChangeFileEmitter.fire(events);
   }
@@ -208,11 +199,13 @@ export class FragmentsFS implements vscode.FileSystemProvider {
   removeDocument(primary: Uri) {
     const key = canonOrigUri(primary);
     const events = [];
+    let idx = 0;
     for (const fragment of this.files.get(key).fragments.values()) {
       events.push({
         type: vscode.FileChangeType.Deleted,
-        uri: orig2vdoc(primary, fragment.langFileExt),
+        uri: orig2vdoc(primary, idx, fragment.langFileExt),
       });
+      idx++;
     }
     this.onDidChangeFileEmitter.fire(events);
     this.files.delete(key);
@@ -278,8 +271,8 @@ export class FragmentsFS implements vscode.FileSystemProvider {
   _lookup(uri: Uri): Fragment | undefined {
     let key = vdoc2orig(uri);
     key = key.toLowerCase(); // DEFENSIVE
-    const lang = vdocGetLang(uri) as LangFileExtension;
-    return this.files.get(key)?.fragments.get(lang);
+    const idx = vdocGetIndex(uri);
+    return this.files.get(key)?.fragments[idx];
   }
 
   _getOrMakeAtt(primary: Uri) {

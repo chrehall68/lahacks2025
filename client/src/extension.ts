@@ -26,6 +26,7 @@ import { JSONRPCEndpoint } from "ts-lsp-client";
 import { InitializeParams } from "vscode-languageclient";
 import {
   canonOrigUri,
+  Fragment,
   FragmentsFS,
   FS_SCHEME,
   orig2vdoc,
@@ -62,17 +63,19 @@ let fs: FragmentsFS;
 // ==============================
 
 function getInjectionAtPosition(
-  regions: Region[],
+  regions: Fragment[],
   offset: number
-): Region | null {
+): [Fragment, number] | null {
+  let idx = 0;
   for (const region of regions) {
     if (region.start <= offset) {
       if (offset <= region.end) {
-        return region;
+        return [region, idx];
       }
     } else {
       break;
     }
+    idx++;
   }
   return null;
 }
@@ -86,21 +89,49 @@ class InjectionCodeLensProvider implements CodeLensProvider {
   ): vscode.ProviderResult<vscode.CodeLens[]> {
     const att = fs.files.get(canonOrigUri(document.uri));
     const codeLenses = [];
-    for (const injection of att.injections.values()) {
+    Array.from(att.fragments.values()).forEach((fragment, i) => {
       const range = new Range(
-        document.positionAt(injection.start),
-        document.positionAt(injection.end)
+        document.positionAt(fragment.start),
+        document.positionAt(fragment.end)
       );
       codeLenses.push(
         new CodeLens(range, {
           title: "New Tab",
           tooltip: "Open injected fragment in a new buffer",
           command: "lahacks2025.openFragment",
-          arguments: [orig2vdoc(document.uri, injection.langFileExt)],
+          arguments: [orig2vdoc(document.uri, i, fragment.langFileExt)],
         })
       );
-    }
+    });
     return codeLenses;
+  }
+}
+
+function translate(doc: TextDocument, pos: vscode.Position, off: number): vscode.Position {
+  return doc.positionAt(doc.offsetAt(pos) + off);
+}
+
+function translateCompletionResults(document: TextDocument, res: vscode.CompletionList, off: number): vscode.CompletionList {
+  for (const item of res.items) {
+    const r = item.range;
+    if (r instanceof Range) {
+      item.range = new Range(
+        translate(document, r.start, off),
+        translate(document, r.end, off)
+      );
+    } else {
+      // {inserting, replacing} struct
+      item.range = {
+        inserting: new Range(
+          translate(document, r.inserting.start, off),
+          translate(document, r.inserting.end, off),
+        ),
+        replacing: new Range(
+          translate(document, r.replacing.start, off),
+          translate(document, r.replacing.end, off),
+        )
+      };
+    }
   }
 }
 
@@ -112,13 +143,16 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
     context: vscode.CompletionContext
   ) {
     const att = fs.files.get(canonOrigUri(document.uri));
-    const injection = getInjectionAtPosition(
-      att.injections,
+    const [fragment, idx] = getInjectionAtPosition(
+      att.fragments,
       document.offsetAt(position)
     );
 
+    // shift backwards to the start of the virtual document
+    position = translate(document, position, -fragment.start);
+
     // If not in an injection fragment, forward the request to primary LS directly
-    if (!injection) {
+    if (!fragment) {
       if (document.uri.scheme === FS_SCHEME) {
         let endpoint: JSONRPCEndpoint;
         let extension: string;
@@ -134,7 +168,7 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
 
         // call language server
         const doc = document.getText();
-        const docName = `file://${vdoc2orig(document.uri)}.${extension}`;
+        const docName = `file://${vdoc2orig(document.uri)}${idx}.${extension}`;
         const muxResult = await mutex.runExclusive(async () => {
           if (!documentInitialized.get(document.uri.toString())) {
             console.log("Sending textDocument/didOpen");
@@ -205,9 +239,10 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
             const it = new vscode.CompletionItem(item.label);
             it.kind = item.kind;
             it.sortText = item.sortText;
+            it.detail = item.detail;
             results.push(it);
           }
-          return results;
+          return translateCompletionResults(document, muxResult, fragment.start);
         }
       }
 
@@ -217,11 +252,11 @@ class InjectionCodeCompleteProvider implements vscode.CompletionItemProvider {
     // Otherwise, forward to minion LS
     const res = await commands.executeCommand<vscode.CompletionList>(
       "vscode.executeCompletionItemProvider",
-      orig2vdoc(document.uri, injection.langFileExt),
+      orig2vdoc(document.uri, idx, fragment.langFileExt),
       position,
       context.triggerCharacter
     );
-    return res;
+    return translateCompletionResults(document, res, fragment.start);
   }
 }
 
@@ -455,7 +490,7 @@ export function activate(context: ExtensionContext) {
 }
 
 class DiagnosticAggregatorViewProvider implements vscode.WebviewViewProvider {
-  constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(private readonly _extensionUri: vscode.Uri) { }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
