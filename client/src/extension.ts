@@ -108,7 +108,16 @@ class InjectionCodeLensProvider implements CodeLensProvider {
 }
 
 function translate(doc: TextDocument, pos: vscode.Position, off: number): vscode.Position {
-  return doc.positionAt(doc.offsetAt(pos) + off);
+  // return doc.positionAt(doc.offsetAt(pos) + off);
+  if (off < 0) {
+    off = -off;
+  }
+  let { line, character } = doc.positionAt(off);
+  if (off < 0) {
+    line = -line;
+    character = -character;
+  }
+  return pos.translate(line, character);
 }
 
 function translateCompletionResults(document: TextDocument, res: vscode.CompletionList, off: number): vscode.CompletionList {
